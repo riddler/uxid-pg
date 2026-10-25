@@ -1,8 +1,0 @@
-### Added
-
-- `uxid_decode(id, clock_ms, delimiter)` decodes an id to one row of `prefix`, `size`, `compact`, `deterministic` and `time_ms` (NULL for a deterministic id). The body is everything after the last delimiter; the size and time form come from its length; a compact time takes its high bits from the clock, the transaction time (`now()`) when `clock_ms` is NULL, and steps back one 2^40 ms window when it would be more than a day ahead of it, with no clamp at zero. It is stable and parallel safe.
-- `uxid_decode_at(id, clock_ms, delimiter)` is the same decoder against the clock it is given; it is immutable and parallel safe.
-- A malformed id is refused with SQLSTATE 22P02 (`invalid_text_representation`) and the message `uxid: empty`, `uxid: invalid_length` or `uxid: invalid_character`, checked in that order, with the body's length counted in UTF-8 bytes whatever the database encoding. An empty delimiter, or a compact time with no clock or one outside 0 to 2^48 - 1, is refused with SQLSTATE 22023 and `uxid: invalid_argument`.
-- `uxid_decode_error(id, delimiter)` returns the reason an id would be refused, or NULL for one that decodes, and never raises.
-- `uxid_is_valid(id, delimiter, required_prefix)` and `uxid_is_deterministic(id, delimiter)` check an id without reading a clock; both ask for a body that fully decodes, which is stricter than the Elixir reference, and answer NULL for a NULL id. They are immutable and parallel safe.
-- The domain `uxid` over `text COLLATE "C"` refuses any value `uxid_is_valid` refuses, so lower-case ids of one prefix and size sort by time. Every function still takes and returns `text`, so a `text` column works unchanged and `ALTER TABLE ... ALTER COLUMN id TYPE uxid` is the opt-in.

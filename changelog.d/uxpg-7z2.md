@@ -1,3 +1,0 @@
-### Added
-
-- `uxid_from(prefix, key, size, letter_case, delimiter)` builds the deterministic id of a key: the same prefix, key and size always give the same id, such as `usr_zcvt7epac0t1ebcsjfyf7cwz25` for `usr` and `alice@example.com` at the default size `xl`. The id is the marker `z` and the leading characters of a SHA-256 of the prefix and the key, hashed as UTF-8 bytes whatever the database encoding, so the same text gives the same id in every database. A deterministic id has no compact form, time or random field. A NULL key gives NULL, and NULL or the empty string is no prefix. It refuses a request as `uxid_check_request` does, an unknown size or letter case or an empty delimiter included, even for a NULL key. It is immutable and parallel safe.
