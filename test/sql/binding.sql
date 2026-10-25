@@ -11,6 +11,7 @@ SET search_path = pg_catalog;
 SELECT public.uxid_encode('usr', 's', 1700000000000, '\x0123'::bytea);
 SELECT public.uxid_generate('usr', 'xs', TRUE) ~ '^usr_[0-9a-hjkmnp-tv-z]{10}$'
     AS generated_shape;
+SELECT public.uxid_from('usr', 'alice@example.com', 's');
 SELECT public.uxid_check_request(size => 'xs', monotonic => TRUE);
 SELECT public.uxid_check_request(rand_size => 11);
 SELECT public.uxid_version();
@@ -18,6 +19,7 @@ SELECT public.uxid_version();
 -- The empty search_path, as a dump restore sets it.
 SET search_path = '';
 SELECT public.uxid_encode('usr', 's', 1700000000000, '\x0123'::bytea);
+SELECT public.uxid_from('usr', 'alice@example.com', 's');
 SELECT length(public.uxid_generate()) AS generated_length;
 SELECT public.uxid_check_request(delimiter => '');
 RESET search_path;
@@ -32,6 +34,7 @@ SELECT
         'usr', 's', 1700000000000, '\x0123'::bytea, letter_case => 'upper'
     );
 SELECT length(uxid_moved.uxid_generate('usr', 'm')) AS generated_length;
+SELECT uxid_moved.uxid_from('usr', 'alice@example.com', 's');
 SELECT uxid_moved.uxid_check_request(size => 'huge');
 SELECT n.nspname
 FROM pg_extension AS e

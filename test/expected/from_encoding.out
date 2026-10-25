@@ -1,0 +1,52 @@
+-- uxid_from hashes the prefix and the key as UTF-8 bytes whatever the
+-- database encoding, so the same text gives the same id in every
+-- database. In a UTF-8 database, such as the one the gate's server
+-- creates, convert_to(key, 'UTF8') and the stored bytes are one thing:
+-- only a database in another encoding tells hashing the stored bytes
+-- (wrong) from converting them to UTF-8 first (right).
+\set regress_db :DBNAME
+SET client_encoding = 'UTF8';
+CREATE DATABASE uxid_from_latin1
+ENCODING 'LATIN1' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0;
+CREATE DATABASE uxid_from_sql_ascii
+ENCODING 'SQL_ASCII' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0;
+-- In a LATIN1 database the key cafe with e acute is stored as 4 bytes, and
+-- the id is still the corpus's, which hashes its 5 UTF-8 bytes.
+-- sabotage: convert_to(key, getdatabaseencoding()) in place of
+-- convert_to(key, 'UTF8') -> " LATIN1   | cus_ztsfaxs4jm14ptasec | f
+-- |            4 |          5" (the only test that fails; textsend(key)
+-- in its place is not caught, as it answers the client_encoding's bytes,
+-- UTF8 here)
+\c uxid_from_latin1
+SET client_encoding = 'UTF8';
+CREATE EXTENSION uxid;
+SELECT
+    getdatabaseencoding() AS db_encoding,
+    uxid_from('cus', 'café', 'm') AS id,
+    uxid_from('cus', 'café', 'm') = 'cus_zfsx9se75671f9kdjv' AS matches,
+    octet_length(convert_to('café', getdatabaseencoding())) AS stored_bytes,
+    octet_length(convert_to('café', 'UTF8')) AS utf8_bytes;
+ db_encoding |           id           | matches | stored_bytes | utf8_bytes 
+-------------+------------------------+---------+--------------+------------
+ LATIN1      | cus_zfsx9se75671f9kdjv | t       |            4 |          5
+(1 row)
+
+-- In a SQL_ASCII database no conversion exists, so the client's UTF-8
+-- bytes are stored as they came (5 bytes) and hashed as they are.
+\c uxid_from_sql_ascii
+SET client_encoding = 'UTF8';
+CREATE EXTENSION uxid;
+SELECT
+    getdatabaseencoding() AS db_encoding,
+    uxid_from('cus', 'café', 'm') AS id,
+    uxid_from('cus', 'café', 'm') = 'cus_zfsx9se75671f9kdjv' AS matches,
+    octet_length(convert_to('café', getdatabaseencoding())) AS stored_bytes,
+    octet_length(convert_to('café', 'UTF8')) AS utf8_bytes;
+ db_encoding |           id           | matches | stored_bytes | utf8_bytes 
+-------------+------------------------+---------+--------------+------------
+ SQL_ASCII   | cus_zfsx9se75671f9kdjv | t       |            5 |          5
+(1 row)
+
+\c :regress_db
+DROP DATABASE uxid_from_latin1;
+DROP DATABASE uxid_from_sql_ascii;

@@ -20,6 +20,12 @@ SELECT public.uxid_generate('usr', 'xs', TRUE) ~ '^usr_[0-9a-hjkmnp-tv-z]{10}$'
  t
 (1 row)
 
+SELECT public.uxid_from('usr', 'alice@example.com', 's');
+     uxid_from      
+--------------------
+ usr_z5rtsrkhx2h4dr
+(1 row)
+
 SELECT public.uxid_check_request(size => 'xs', monotonic => TRUE);
  uxid_check_request 
 --------------------
@@ -40,6 +46,12 @@ SELECT public.uxid_encode('usr', 's', 1700000000000, '\x0123'::bytea);
     uxid_encode     
 --------------------
  usr_01hf7yat0004h1
+(1 row)
+
+SELECT public.uxid_from('usr', 'alice@example.com', 's');
+     uxid_from      
+--------------------
+ usr_z5rtsrkhx2h4dr
 (1 row)
 
 SELECT length(public.uxid_generate()) AS generated_length;
@@ -69,6 +81,12 @@ SELECT length(uxid_moved.uxid_generate('usr', 'm')) AS generated_length;
  generated_length 
 ------------------
                22
+(1 row)
+
+SELECT uxid_moved.uxid_from('usr', 'alice@example.com', 's');
+     uxid_from      
+--------------------
+ usr_z5rtsrkhx2h4dr
 (1 row)
 
 SELECT uxid_moved.uxid_check_request(size => 'huge');

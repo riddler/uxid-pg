@@ -34,9 +34,10 @@ ORDER BY p.proname;
 --------------------+-------------+-------------+---------+--------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  uxid_check_request | i           | s           | sql     | void   | prefix text DEFAULT NULL::text, size text DEFAULT 'xl'::text, compact boolean DEFAULT NULL::boolean, rand_size integer DEFAULT NULL::integer, letter_case text DEFAULT 'lower'::text, delimiter text DEFAULT '_'::text, time_ms bigint DEFAULT NULL::bigint, rand bytea DEFAULT NULL::bytea, from_key text DEFAULT NULL::text, monotonic boolean DEFAULT false
  uxid_encode        | i           | s           | sql     | text   | prefix text, size text, time_ms bigint, rand bytea, compact boolean DEFAULT false, letter_case text DEFAULT 'lower'::text, delimiter text DEFAULT '_'::text, rand_size integer DEFAULT NULL::integer
+ uxid_from          | i           | s           | sql     | text   | prefix text, key text, size text DEFAULT 'xl'::text, letter_case text DEFAULT 'lower'::text, delimiter text DEFAULT '_'::text
  uxid_generate      | v           | s           | sql     | text   | prefix text DEFAULT NULL::text, size text DEFAULT 'xl'::text, compact boolean DEFAULT false, rand_size integer DEFAULT NULL::integer, letter_case text DEFAULT 'lower'::text, delimiter text DEFAULT '_'::text, time_ms bigint DEFAULT NULL::bigint
  uxid_version       | i           | s           | sql     | text   | 
-(4 rows)
+(5 rows)
 
 -- The internal helpers, which start uxid__. The raise helper is VOLATILE
 -- so the planner never evaluates it ahead of time out of a CASE branch
@@ -117,9 +118,10 @@ ORDER BY p.proname;
  uxid__uuid_bytes   | t
  uxid_check_request | t
  uxid_encode        | t
+ uxid_from          | t
  uxid_generate      | t
  uxid_version       | t
-(12 rows)
+(13 rows)
 
 -- Every function except the raise helper is LANGUAGE sql with a BEGIN
 -- ATOMIC body (prosqlbody set), so its callees are bound when it is
@@ -151,9 +153,10 @@ ORDER BY p.proname;
  uxid__uuid_bytes   | t
  uxid_check_request | t
  uxid_encode        | t
+ uxid_from          | t
  uxid_generate      | t
  uxid_version       | t
-(12 rows)
+(13 rows)
 
 -- No function of the extension calls random() or setseed(); the random
 -- bytes come from gen_random_uuid().
