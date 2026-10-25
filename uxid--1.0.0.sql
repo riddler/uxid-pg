@@ -568,3 +568,104 @@ COMMENT ON FUNCTION uxid_generate(
 'fully random bytes of uuid_send(gen_random_uuid()). Defaults: size xl, '
 'standard time, lower case, delimiter _, no prefix (NULL and the empty '
 'string are both no prefix). Refuses as uxid_check_request does.';
+
+-- The deterministic id of a key: the same prefix, key and size always give
+-- the same id. The hash input is the prefix, a zero byte, the key, a zero
+-- byte and one byte holding the number of hash characters (xs 9, s 13,
+-- m 17, l 21, xl 25), all hashed with SHA-256; the body is the marker z
+-- and the first that many characters of the digest's base32. A NULL
+-- prefix and the empty string are both no prefix. The prefix and the key
+-- reach sha256 as their UTF-8 bytes whatever the database encoding
+-- (convert_to(..., 'UTF8')), so the same text gives the same id in every
+-- database; in a SQL_ASCII database, which has no conversion to UTF-8,
+-- the stored bytes are hashed as they are. A database's encoding never
+-- changes, so the function is immutable. The request is checked first,
+-- so a refusal does not depend on the key; then a NULL key gives NULL.
+-- The letter case changes the body only, never the prefix.
+CREATE FUNCTION uxid_from(
+    prefix text,
+    key text,
+    size text DEFAULT 'xl',
+    letter_case text DEFAULT 'lower',
+    delimiter text DEFAULT '_'
+)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE PARALLEL SAFE
+BEGIN ATOMIC
+    SELECT
+        uxid_check_request(
+            prefix => prefix,
+            size => size,
+            letter_case => letter_case,
+            delimiter => delimiter,
+            from_key => key
+        );
+    SELECT
+        CASE
+            WHEN id.no_key THEN NULL
+            ELSE
+                id.head
+                || CASE
+                    WHEN id.letter_case = 'upper'
+                        THEN
+                            translate(
+                                id.body,
+                                'abcdefghjkmnpqrstvwxyz',
+                                'ABCDEFGHJKMNPQRSTVWXYZ'
+                            )
+                    ELSE id.body
+                END
+        END
+    FROM
+        (
+            SELECT
+                req.letter_case,
+                req.no_key,
+                req.head,
+                'z'
+                || left(
+                    uxid__base32_bytes(
+                        sha256(
+                            req.hashed_head
+                            || set_byte('\x00'::bytea, 0, req.chars)
+                        )
+                    ),
+                    req.chars
+                ) AS body
+            FROM
+                (
+                    SELECT
+                        letter_case,
+                        key IS NULL AS no_key,
+                        coalesce(
+                            nullif(prefix, '') || coalesce(delimiter, '_'),
+                            ''
+                        ) AS head,
+                        convert_to(coalesce(prefix, ''), 'UTF8')
+                        || '\x00'::bytea
+                        || convert_to(key, 'UTF8')
+                        || '\x00'::bytea AS hashed_head,
+                        CASE uxid__size(size)
+                            WHEN 'xs' THEN 9
+                            WHEN 's' THEN 13
+                            WHEN 'm' THEN 17
+                            WHEN 'l' THEN 21
+                            WHEN 'xl' THEN 25
+                        END AS chars
+                ) AS req
+        ) AS id;
+END;
+
+COMMENT ON FUNCTION uxid_from(text, text, text, text, text) IS
+'Builds the deterministic id of a key: SHA-256 of the prefix, a zero byte, '
+'the key, a zero byte and one byte holding the hash character count, '
+'behind the marker z (xs 9, s 13, m 17, l 21, xl 25 hash characters). The '
+'prefix and the key are hashed as UTF-8 bytes whatever the database '
+'encoding (in a SQL_ASCII database, which has no conversion to UTF-8, the '
+'stored bytes are hashed as they are), so the id does not depend on it. '
+'A deterministic id has no compact form, time or random field. A NULL '
+'key gives NULL; a NULL prefix and the empty string are both no prefix; '
+'lower case is the default and upper case changes the body only. Refuses '
+'as uxid_check_request does, before the key is read. Defaults: size xl, '
+'lower case, delimiter _.';
