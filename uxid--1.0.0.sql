@@ -1436,9 +1436,13 @@ COMMENT ON FUNCTION uxid_monotonic_step(
 -- holding "<time_ms>:<rand>" in decimal, read with current_setting(name,
 -- true) and written with set_config(name, value, false). The first
 -- statement refuses the request before anything is read, drawn or
--- written; the second reads the state, draws two UUIDs' worth of random
--- bytes, takes the step, encodes the id (uxid_encode checks the time the
--- id carries) and writes the new state with a value computed from that
+-- written; it checks the given time_ms against the time range only (an
+-- in-range time is passed to the check as 0), because the id may carry
+-- the last id's time rather than the clock's, and the compact guard
+-- applies to the time the id carries. The second reads the state, draws
+-- two UUIDs' worth of random bytes, takes the step, encodes the id
+-- (uxid_encode checks the time the id carries, the compact guard
+-- included) and writes the new state with a value computed from that
 -- id, so the encoder has accepted the id before the state is written. A
 -- setting written in a statement that fails is undone with it, so a
 -- refused call leaves the state as it was.
@@ -1463,7 +1467,10 @@ BEGIN ATOMIC
             rand_size => rand_size,
             letter_case => letter_case,
             delimiter => delimiter,
-            time_ms => time_ms,
+            time_ms => CASE
+                WHEN time_ms BETWEEN 0 AND 281474976710655 THEN 0
+                ELSE time_ms
+            END,
             monotonic => TRUE
         );
     SELECT
