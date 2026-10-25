@@ -1,0 +1,543 @@
+-- uxid_monotonic: the monotonic generator, its state in a session
+-- setting per prefix and random width, and what a refusal, a rollback and
+-- a reset do to that state.
+\set SHOW_CONTEXT never
+-- The state of one generator: its session setting, or NULL when this
+-- session has no such setting (the empty string after a reset).
+CREATE FUNCTION pg_temp.state(setting_name text)
+RETURNS text
+LANGUAGE sql
+AS $state$
+    SELECT current_setting(setting_name, TRUE);
+$state$;
+-- With no state, the first id carries the given time and a fresh random
+-- field, and the state is written under uxid.mono_<hex of the prefix>_
+-- <width> as "<time>:<value>": here usr is 757372 and an s id's field is
+-- 2 bytes. The id is the state's time and value through the encoder.
+-- sabotage: coalesce(prefix, '') in place of the hex of the prefix's
+-- bytes in the setting name -> "ERROR:  uxid: invalid_argument:
+-- uxid_encode needs a time_ms" (id_from_state finds no state)
+-- sabotage: TRUE in place of FALSE as set_config's is_local in
+-- uxid_monotonic -> "ERROR:  invalid input syntax for type bigint: """
+-- (the state is gone after the statement)
+SELECT pg_temp.state('uxid.mono_757372_2') IS NULL AS no_state_yet;
+ no_state_yet 
+--------------
+ t
+(1 row)
+
+SELECT uxid_monotonic('usr', 's', time_ms => 1700000000000) AS first_id
+\gset
+SELECT
+    pg_temp.state('uxid.mono_757372_2') ~ '^1700000000000:[0-9]+$'
+        AS state_shape,
+    uxid_encode(
+        'usr',
+        's',
+        split_part(pg_temp.state('uxid.mono_757372_2'), ':', 1)::bigint,
+        uxid__numeric_bytes(
+            split_part(pg_temp.state('uxid.mono_757372_2'), ':', 2)::numeric, 2
+        )
+    ) = :'first_id' AS id_from_state;
+ state_shape | id_from_state 
+-------------+---------------
+ t           | t
+(1 row)
+
+-- At one time, every later id carries that time and sorts strictly after
+-- the one before it, within one statement and across statements; each
+-- value is the last plus a step from 1 to 2^(4w) (here 1 to 256), or,
+-- when that would overflow the field, the next millisecond with a fresh
+-- value.
+-- sabotage: req.now_ms in place of st.time_ms as uxid_encode's time in
+-- uxid_monotonic -> " 300 |          300 | f                   | t ..."
+-- (strictly_increasing false: an overflowed id carries the clock's
+-- millisecond)
+CREATE TEMPORARY TABLE burst (n integer, id text, state text);
+DO $burst$
+BEGIN
+    FOR i IN 1 .. 300 LOOP
+        INSERT INTO burst (n, id, state)
+        SELECT
+            i,
+            uxid_monotonic('usr', 's', time_ms => 1700000000000),
+            NULL;
+        UPDATE burst SET state = pg_temp.state('uxid.mono_757372_2')
+        WHERE n = i;
+    END LOOP;
+END;
+$burst$;
+WITH
+steps AS (
+    SELECT
+        b.n,
+        b.id,
+        lag(b.id) OVER (ORDER BY b.n) AS previous_id,
+        split_part(b.state, ':', 1)::bigint AS state_time,
+        split_part(b.state, ':', 2)::numeric AS state_value,
+        lag(split_part(b.state, ':', 1)::bigint) OVER (ORDER BY b.n)
+            AS previous_time,
+        lag(split_part(b.state, ':', 2)::numeric) OVER (ORDER BY b.n)
+            AS previous_value
+    FROM burst AS b
+)
+SELECT
+    count(*) AS ids,
+    count(DISTINCT s.id) AS distinct_ids,
+    bool_and(s.previous_id IS NULL OR s.id::uxid > s.previous_id::uxid)
+        AS strictly_increasing,
+    bool_and(
+        s.previous_time IS NULL
+        OR (
+            s.state_time = s.previous_time
+            AND s.state_value - s.previous_value BETWEEN 1 AND 256
+        )
+        OR (
+            s.state_time = s.previous_time + 1
+            AND s.previous_value + 256 >= 65536
+        )
+    ) AS every_step_in_range,
+    min(s.state_time) >= 1700000000000
+    AND max(s.state_time) < 1700000000010 AS within_ten_ms
+FROM steps AS s;
+ ids | distinct_ids | strictly_increasing | every_step_in_range | within_ten_ms 
+-----+--------------+---------------------+---------------------+---------------
+ 300 |          300 | t                   | t                   | t
+(1 row)
+
+-- One statement that calls the generator many times sees each call's
+-- state: the ids are distinct and in order.
+SELECT
+    count(DISTINCT g.id) AS distinct_ids,
+    bool_and(g.id::uxid > g.previous_id::uxid) FILTER (
+        WHERE g.previous_id IS NOT NULL
+    ) AS strictly_increasing
+FROM
+    (
+        SELECT
+            q.id,
+            lag(q.id) OVER (ORDER BY q.n) AS previous_id
+        FROM
+            (
+                SELECT
+                    s.n,
+                    uxid_monotonic('doc', 'l', time_ms => 1700000000000) AS id
+                FROM generate_series(1, 50) AS s (n)
+            ) AS q
+    ) AS g;
+ distinct_ids | strictly_increasing 
+--------------+---------------------
+           50 | t
+(1 row)
+
+-- A clock that moves back keeps the last time; a later clock starts a
+-- fresh value at that time. An xl field is 80 bits and a step at most
+-- 2^40, so these steps never overflow.
+-- sabotage: now_ms > last_time_ms changed to now_ms <> last_time_ms in
+-- uxid__monotonic_rule -> " 1699999999000" under back_time
+SELECT uxid_monotonic('item', time_ms => 1700000000000) ~ '^item_'
+    AS item_id;
+ item_id 
+---------
+ t
+(1 row)
+
+SELECT d.time_ms AS back_time
+FROM
+    uxid_decode_at(
+        uxid_monotonic('item', time_ms => 1699999999000), 1700000000000
+    ) AS d;
+   back_time   
+---------------
+ 1700000000000
+(1 row)
+
+SELECT d.time_ms AS later_time
+FROM
+    uxid_decode_at(
+        uxid_monotonic('item', time_ms => 1700000005000), 1700000000000
+    ) AS d;
+  later_time   
+---------------
+ 1700000005000
+(1 row)
+
+SELECT split_part(pg_temp.state('uxid.mono_6974656d_10'), ':', 1) AS state_time;
+  state_time   
+---------------
+ 1700000005000
+(1 row)
+
+-- With no time_ms the time is the clock's (clock_timestamp()).
+SELECT
+    abs(
+        d.time_ms - floor(extract(EPOCH FROM clock_timestamp()) * 1000)
+    ) < 60000 AS clock_time
+FROM uxid_decode(uxid_monotonic('item', 'm')) AS d;
+ clock_time 
+------------
+ t
+(1 row)
+
+-- One state per prefix and per random width: another prefix, another
+-- rand_size and another time form each have their own setting; NULL and
+-- the empty string are both no prefix and share one; the prefix is hex of
+-- its UTF-8 bytes, so any prefix makes a setting name.
+-- sabotage: drop the "_" || width part of the setting name ->
+-- "ERROR:  uxid: invalid_argument: uxid_encode needs a time_ms" at the
+-- first state read, and " f" rows below
+SELECT uxid_monotonic('doc', 's', time_ms => 1700000000000) ~ '^doc_'
+    AS doc_id;
+ doc_id 
+--------
+ t
+(1 row)
+
+SELECT
+    uxid_monotonic('usr', 's', rand_size => 4, time_ms => 1700000000000)
+    ~ '^usr_[0-9a-hjkmnp-tv-z]{17}$' AS wider_id;
+ wider_id 
+----------
+ t
+(1 row)
+
+SELECT
+    uxid_monotonic('usr', 's', TRUE, time_ms => 1700000000000)
+    ~ '^usr_[0-9a-hjkmnp-tv-z]{13}$' AS compact_id;
+ compact_id 
+------------
+ t
+(1 row)
+
+SELECT uxid_monotonic(NULL, 'm', time_ms => 1700000000000) AS no_prefix_id
+\gset
+SELECT uxid_monotonic('', 'm', time_ms => 1700000000000) AS empty_prefix_id
+\gset
+SELECT
+    pg_temp.state('uxid.mono_646f63_2') ~ '^1700000000000:' AS own_prefix_state,
+    pg_temp.state('uxid.mono_757372_4') ~ '^1700000000000:' AS own_width_state,
+    pg_temp.state('uxid.mono_757372_3') ~ '^1700000000000:'
+        AS own_compact_state,
+    pg_temp.state('uxid.mono__5') ~ '^170000000000[01]:' AS no_prefix_state,
+    :'empty_prefix_id' COLLATE "C" > :'no_prefix_id' AS shared_state,
+    uxid_encode(
+        NULL,
+        'm',
+        split_part(pg_temp.state('uxid.mono__5'), ':', 1)::bigint,
+        uxid__numeric_bytes(
+            split_part(pg_temp.state('uxid.mono__5'), ':', 2)::numeric, 5
+        )
+    ) = :'empty_prefix_id' AS state_is_last_id,
+    :'empty_prefix_id' ~ '^[0-9a-hjkmnp-tv-z]{18}$' AS bare_body;
+ own_prefix_state | own_width_state | own_compact_state | no_prefix_state | shared_state | state_is_last_id | bare_body 
+------------------+-----------------+-------------------+-----------------+--------------+------------------+-----------
+ t                | t               | t                 | t               | t            | t                | t
+(1 row)
+
+SELECT
+    uxid_monotonic('caf' || chr(233), 'xs', time_ms => 1700000000000)
+    ~ ('^caf' || chr(233) || '_[0-9a-hjkmnp-tv-z]{10}$') AS accented_id,
+    pg_temp.state('uxid.mono_636166c3a9_1') ~ '^1700000000000:'
+        AS accented_state,
+    uxid_monotonic(repeat('p', 200), 'xs', time_ms => 1700000000000)
+    ~ '^p{200}_' AS long_prefix_id;
+ accented_id | accented_state | long_prefix_id 
+-------------+----------------+----------------
+ t           | t              | t
+(1 row)
+
+-- An xs always uses compact time, so its field has 1 byte to step: with
+-- no time form given or compact true it is a compact xs (10 characters,
+-- the time at the given millisecond or, after an overflow of its 1-byte
+-- field, one of the next two);
+-- an explicit compact false is refused, with or without a rand_size.
+-- Upper case and another delimiter work as for uxid_generate.
+-- sabotage: AND req.width = 0 added to the monotonic xs condition in
+-- uxid_check_request -> " xs, compact false, rand_size 1 | accepted"
+CREATE FUNCTION pg_temp.refusal(statement text)
+RETURNS text
+LANGUAGE plpgsql
+AS $refusal$
+DECLARE
+    state text;
+    message text;
+BEGIN
+    EXECUTE statement;
+    RETURN 'accepted';
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS
+        state = RETURNED_SQLSTATE,
+        message = MESSAGE_TEXT;
+    RETURN state || ' ' || message;
+END;
+$refusal$;
+SELECT
+    uxid_monotonic('usr', 'xs', time_ms => 1700000000000)
+    ~ '^usr_hf7yat0[0-2][0-9a-hjkmnp-tv-z]{2}$' AS xs_default,
+    uxid_monotonic('usr', 'xs', TRUE, time_ms => 1700000000000)
+    ~ '^usr_hf7yat0[0-2][0-9a-hjkmnp-tv-z]{2}$' AS xs_compact,
+    uxid_monotonic(
+        'usr', 'xsmall', letter_case => 'upper', delimiter => '-',
+        time_ms => 1700000000000
+    ) ~ '^usr-HF7YAT0[0-2][0-9A-HJKMNP-TV-Z]{2}$' AS xs_upper;
+ xs_default | xs_compact | xs_upper 
+------------+------------+----------
+ t          | t          | t
+(1 row)
+
+-- The refusals: as uxid_check_request refuses a monotonic request. The
+-- generator takes no key and no fixed random field; uxid_check_request
+-- refuses those as from_with_monotonic and rand_with_monotonic (the
+-- corpus's cases, in check_request).
+SELECT
+    c.request,
+    pg_temp.refusal(c.statement) AS refusal
+FROM
+    (
+        VALUES
+        (
+            1,
+            'xs, compact false',
+            $s$SELECT uxid_monotonic('usr', 'xs', FALSE)$s$
+        ),
+        (
+            2,
+            'xs, compact false, rand_size 1',
+            $s$SELECT uxid_monotonic('usr', 'xs', FALSE, 1)$s$
+        ),
+        (
+            3,
+            'rand_size 0',
+            $s$SELECT uxid_monotonic('usr', 's', rand_size => 0)$s$
+        ),
+        (
+            4,
+            'rand_size 11',
+            $s$SELECT uxid_monotonic('usr', rand_size => 11)$s$
+        ),
+        (
+            5,
+            'unknown size',
+            $s$SELECT uxid_monotonic('usr', 'huge')$s$
+        ),
+        (
+            6,
+            'empty delimiter',
+            $s$SELECT uxid_monotonic('usr', delimiter => '')$s$
+        ),
+        (
+            7,
+            'time past 2^48 - 1',
+            $s$SELECT uxid_monotonic('usr', time_ms => 281474976710656)$s$
+        ),
+        (
+            8,
+            'compact time at the guard',
+            $s$SELECT uxid_monotonic('usr', 's', TRUE,
+            time_ms => 2164663517184)$s$
+        ),
+        (
+            9,
+            'from_with_monotonic',
+            $s$SELECT uxid_check_request(prefix => 'usr',
+            from_key => 'alice@example.com', monotonic => TRUE)$s$
+        ),
+        (
+            10,
+            'rand_with_monotonic',
+            $s$SELECT uxid_check_request(prefix => 'usr', size => 's',
+            rand => '\x0102', monotonic => TRUE)$s$
+        )
+    ) AS c (n, request, statement)
+ORDER BY c.n;
+            request             |                                                               refusal                                                                
+--------------------------------+--------------------------------------------------------------------------------------------------------------------------------------
+ xs, compact false              | 22023 uxid: invalid_argument: a monotonic xs uses compact time, so its random field has a byte to step; compact must be NULL or true
+ xs, compact false, rand_size 1 | 22023 uxid: invalid_argument: a monotonic xs uses compact time, so its random field has a byte to step; compact must be NULL or true
+ rand_size 0                    | 22023 uxid: invalid_argument: monotonic generation needs a random field; an xs with standard time or a rand_size of 0 has none
+ rand_size 11                   | 22023 uxid: rand_size_too_large: rand_size must be at most 10; got 11
+ unknown size                   | 22023 uxid: invalid_argument: size must be xs, s, m, l or xl (or xsmall, small, medium, large or xlarge); got 'huge'
+ empty delimiter                | 22023 uxid: invalid_argument: delimiter must not be empty
+ time past 2^48 - 1             | 22023 uxid: invalid_argument: time_ms must be from 0 to 281474976710655; got 281474976710656
+ compact time at the guard      | 22023 uxid: compact_time_out_of_range: the compact time of 2164663517184 would start with the deterministic marker
+ from_with_monotonic            | 22023 uxid: from_with_monotonic: a deterministic id is not generated monotonically
+ rand_with_monotonic            | 22023 uxid: rand_with_monotonic: monotonic generation fills the random field itself
+(10 rows)
+
+-- A refused call leaves the state as it was. Each refusal below is its
+-- own statement, so it aborts its own transaction with no savepoint: one
+-- refused by the request check before anything is read, one refused by
+-- the encoder after the step (the next millisecond, 2^48, is past the
+-- time range) and one at the compact guard (the next millisecond's
+-- compact time would start with the deterministic marker). No setting is
+-- written for a refused request that had no state.
+-- PostgreSQL undoes a setting written in a statement that fails, and the
+-- generator writes its state only after the encoder has accepted the id.
+-- sabotage: req.now_ms in place of st.time_ms as uxid_encode's time in
+-- uxid_monotonic (the id no longer carries the step's time, so the
+-- encoder never sees 2^48) -> " 281474976710656:..." under
+-- after_time_refusal
+SELECT set_config('uxid.mono_757372_2', '281474976710655:65535', FALSE);
+      set_config       
+-----------------------
+ 281474976710655:65535
+(1 row)
+
+SELECT uxid_monotonic('usr', 's', time_ms => 281474976710655);
+ERROR:  uxid: invalid_argument: time_ms must be from 0 to 281474976710655; got 281474976710656
+SELECT pg_temp.state('uxid.mono_757372_2') AS after_time_refusal;
+  after_time_refusal   
+-----------------------
+ 281474976710655:65535
+(1 row)
+
+SELECT uxid_monotonic('usr', 's', rand_size => 11);
+ERROR:  uxid: rand_size_too_large: rand_size must be at most 10; got 11
+SELECT pg_temp.state('uxid.mono_757372_2') AS after_check_refusal;
+  after_check_refusal  
+-----------------------
+ 281474976710655:65535
+(1 row)
+
+SELECT set_config('uxid.mono_757372_3', '2164663517183:16777215', FALSE);
+       set_config       
+------------------------
+ 2164663517183:16777215
+(1 row)
+
+SELECT uxid_monotonic('usr', 's', TRUE, time_ms => 2164663517183);
+ERROR:  uxid: compact_time_out_of_range: the compact time of 2164663517184 would start with the deterministic marker
+SELECT pg_temp.state('uxid.mono_757372_3') AS after_guard_refusal;
+  after_guard_refusal   
+------------------------
+ 2164663517183:16777215
+(1 row)
+
+SELECT uxid_monotonic('fresh', 'xs', FALSE, 1, time_ms => 1700000000000);
+ERROR:  uxid: invalid_argument: a monotonic xs uses compact time, so its random field has a byte to step; compact must be NULL or true
+SELECT pg_temp.state('uxid.mono_6672657368_1') IS NULL AS no_state_written;
+ no_state_written 
+------------------
+ t
+(1 row)
+
+-- The state is transactional: a transaction that aborts, and a savepoint
+-- rolled back, restore the state they found, so the ids returned inside
+-- them may repeat in this session.
+-- No mutation of the extension turns these rows red: they pin
+-- PostgreSQL's own rule, which the generator's documentation states.
+SELECT set_config('uxid.mono_757372_2', '1700000000000:100', FALSE);
+    set_config     
+-------------------
+ 1700000000000:100
+(1 row)
+
+BEGIN;
+SELECT uxid_monotonic('usr', 's', time_ms => 1700000000000) ~ '^usr_'
+    AS inside_transaction;
+ inside_transaction 
+--------------------
+ t
+(1 row)
+
+SELECT pg_temp.state('uxid.mono_757372_2') <> '1700000000000:100'
+    AS changed_inside;
+ changed_inside 
+----------------
+ t
+(1 row)
+
+ROLLBACK;
+SELECT pg_temp.state('uxid.mono_757372_2') AS after_rollback;
+  after_rollback   
+-------------------
+ 1700000000000:100
+(1 row)
+
+-- A PL/pgSQL block with an exception handler runs in a savepoint: an id
+-- generated in it and the error that rolls it back leave the state as
+-- the block found it.
+DO $savepoint$
+BEGIN
+    BEGIN
+        PERFORM uxid_monotonic('usr', 's', time_ms => 1700000000000);
+        RAISE EXCEPTION 'roll the savepoint back';
+    EXCEPTION WHEN raise_exception THEN
+        NULL;
+    END;
+END;
+$savepoint$;
+SELECT pg_temp.state('uxid.mono_757372_2') AS after_savepoint_rollback;
+ after_savepoint_rollback 
+--------------------------
+ 1700000000000:100
+(1 row)
+
+BEGIN;
+SELECT uxid_monotonic('newer', 's', time_ms => 1700000000000) ~ '^newer_'
+    AS first_in_transaction;
+ first_in_transaction 
+----------------------
+ t
+(1 row)
+
+ROLLBACK;
+SELECT coalesce(pg_temp.state('uxid.mono_6e65776572_2'), '') = ''
+    AS no_state_after_rollback;
+ no_state_after_rollback 
+-------------------------
+ t
+(1 row)
+
+SELECT uxid_monotonic('newer', 's', time_ms => 1700000000000) ~ '^newer_'
+    AS fresh_after_rollback;
+ fresh_after_rollback 
+----------------------
+ t
+(1 row)
+
+-- RESET ALL and DISCARD ALL clear the state: the setting reads as the
+-- empty string, and the next call starts afresh.
+RESET ALL;
+SELECT pg_temp.state('uxid.mono_757372_2') AS after_reset_all;
+ after_reset_all 
+-----------------
+ 
+(1 row)
+
+SELECT uxid_monotonic('usr', 's', time_ms => 1600000000000) ~ '^usr_'
+    AS after_reset_id;
+ after_reset_id 
+----------------
+ t
+(1 row)
+
+SELECT pg_temp.state('uxid.mono_757372_2') ~ '^1600000000000:'
+    AS fresh_state;
+ fresh_state 
+-------------
+ t
+(1 row)
+
+DISCARD ALL;
+SELECT current_setting('uxid.mono_757372_2', TRUE) AS after_discard_all;
+ after_discard_all 
+-------------------
+ 
+(1 row)
+
+-- The generator is volatile and parallel unsafe: its state is the
+-- session's, which a parallel worker could not write.
+-- sabotage: PARALLEL SAFE in place of PARALLEL UNSAFE on uxid_monotonic
+-- -> " v           | s           | text" here
+SELECT
+    p.provolatile,
+    p.proparallel,
+    pg_get_function_result(p.oid) AS result
+FROM pg_proc AS p
+WHERE p.proname = 'uxid_monotonic';
+ provolatile | proparallel | result 
+-------------+-------------+--------
+ v           | u           | text
+(1 row)
+

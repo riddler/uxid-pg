@@ -7,7 +7,7 @@ DATA = uxid--1.0.0.sql
 # test/expected/<name>.out.
 REGRESS = version surface base32 encode check_request generate from \
 	from_encoding binding decode decode_refusals decode_encoding validity \
-	domain
+	domain monotonic_step monotonic
 REGRESS_OPTS = --inputdir=test
 
 PG_CONFIG ?= pg_config

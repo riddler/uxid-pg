@@ -34,6 +34,23 @@ SELECT public.uxid_check_request(size => 'xs', monotonic => TRUE);
 
 SELECT public.uxid_check_request(rand_size => 11);
 ERROR:  uxid: rand_size_too_large: rand_size must be at most 10; got 11
+SELECT public.uxid_monotonic('usr', 's', time_ms => 1700000000000) ~ '^usr_'
+    AS monotonic_shape;
+ monotonic_shape 
+-----------------
+ t
+(1 row)
+
+SELECT
+    s.time_ms,
+    s.rand,
+    s.drew
+FROM public.uxid_monotonic_step(1, 5, 1, 2, NULL, 3, NULL) AS s;
+ time_ms | rand | drew 
+---------+------+------
+       1 |    8 | step
+(1 row)
+
 SELECT public.uxid_version();
  uxid_version 
 --------------
@@ -126,6 +143,13 @@ SELECT public.uxid_decode_error('usr_') AS decode_reason;
  empty
 (1 row)
 
+SELECT public.uxid_monotonic('usr', 'xs') ~ '^usr_[0-9a-hjkmnp-tv-z]{10}$'
+    AS monotonic_shape;
+ monotonic_shape 
+-----------------
+ t
+(1 row)
+
 RESET search_path;
 -- After ALTER EXTENSION uxid SET SCHEMA, the functions live in the new
 -- schema and still work with only pg_catalog on the search_path.
@@ -155,6 +179,13 @@ SELECT uxid_moved.uxid_from('usr', 'alice@example.com', 's');
 
 SELECT uxid_moved.uxid_check_request(size => 'huge');
 ERROR:  uxid: invalid_argument: size must be xs, s, m, l or xl (or xsmall, small, medium, large or xlarge); got 'huge'
+SELECT uxid_moved.uxid_monotonic('doc', 'm') ~ '^doc_[0-9a-hjkmnp-tv-z]{18}$'
+    AS monotonic_shape;
+ monotonic_shape 
+-----------------
+ t
+(1 row)
+
 SELECT
     d.prefix,
     d.size,

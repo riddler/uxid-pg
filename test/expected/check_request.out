@@ -111,6 +111,9 @@ FROM
 -- sabotage: req.rand_size < -1 in place of req.rand_size < 0
 -- -> " negative rand_size | 22023 uxid: invalid_argument: rand_size must
 -- not be negative; got -1"
+-- sabotage: AND req.width = 0 added to the monotonic xs condition (the
+-- check of an explicit standard time at xs) -> " monotonic xs with
+-- explicit standard time and rand_size 1 | accepted"
 -- sabotage: 281474976710656 in place of 281474976710655 in the time range
 -- check -> " time past 2^48 - 1 | 22023 uxid: invalid_argument: ..."
 SELECT
@@ -153,23 +156,29 @@ FROM
             monotonic => TRUE)$s$
         ),
         (
+            'monotonic xs with explicit standard time and rand_size 1',
+            $s$SELECT uxid_check_request(size => 'xs', compact => FALSE,
+            rand_size => 1, monotonic => TRUE)$s$
+        ),
+        (
             'monotonic with rand_size 0',
             $s$SELECT uxid_check_request(rand_size => 0,
             monotonic => TRUE)$s$
         )
     ) AS c (request, statement);
-                 request                  |                                                            refusal                                                             
-------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------
- unknown size                             | 22023 uxid: invalid_argument: size must be xs, s, m, l or xl (or xsmall, small, medium, large or xlarge); got 'huge'
- size in upper case                       | 22023 uxid: invalid_argument: size must be xs, s, m, l or xl (or xsmall, small, medium, large or xlarge); got 'XL'
- unknown letter_case                      | 22023 uxid: invalid_argument: letter_case must be lower or upper; got 'title'
- empty delimiter                          | 22023 uxid: invalid_argument: delimiter must not be empty
- negative rand_size                       | 22023 uxid: invalid_argument: rand_size must not be negative; got -1
- time before 0                            | 22023 uxid: invalid_argument: time_ms must be from 0 to 281474976710655; got -1
- time past 2^48 - 1                       | 22023 uxid: invalid_argument: time_ms must be from 0 to 281474976710655; got 281474976710656
- monotonic xs with explicit standard time | 22023 uxid: invalid_argument: monotonic generation needs a random field; an xs with standard time or a rand_size of 0 has none
- monotonic with rand_size 0               | 22023 uxid: invalid_argument: monotonic generation needs a random field; an xs with standard time or a rand_size of 0 has none
-(9 rows)
+                         request                          |                                                               refusal                                                                
+----------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------
+ unknown size                                             | 22023 uxid: invalid_argument: size must be xs, s, m, l or xl (or xsmall, small, medium, large or xlarge); got 'huge'
+ size in upper case                                       | 22023 uxid: invalid_argument: size must be xs, s, m, l or xl (or xsmall, small, medium, large or xlarge); got 'XL'
+ unknown letter_case                                      | 22023 uxid: invalid_argument: letter_case must be lower or upper; got 'title'
+ empty delimiter                                          | 22023 uxid: invalid_argument: delimiter must not be empty
+ negative rand_size                                       | 22023 uxid: invalid_argument: rand_size must not be negative; got -1
+ time before 0                                            | 22023 uxid: invalid_argument: time_ms must be from 0 to 281474976710655; got -1
+ time past 2^48 - 1                                       | 22023 uxid: invalid_argument: time_ms must be from 0 to 281474976710655; got 281474976710656
+ monotonic xs with explicit standard time                 | 22023 uxid: invalid_argument: a monotonic xs uses compact time, so its random field has a byte to step; compact must be NULL or true
+ monotonic xs with explicit standard time and rand_size 1 | 22023 uxid: invalid_argument: a monotonic xs uses compact time, so its random field has a byte to step; compact must be NULL or true
+ monotonic with rand_size 0                               | 22023 uxid: invalid_argument: monotonic generation needs a random field; an xs with standard time or a rand_size of 0 has none
+(10 rows)
 
 -- Requests it accepts: the defaults, every spelling, the ends of standard
 -- time, the compact guard's last valid time, a monotonic xs with no time
