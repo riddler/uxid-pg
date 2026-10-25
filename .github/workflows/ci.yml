@@ -21,8 +21,8 @@ name: CI
 #   extension script through `pgtle.install_extension`, runs
 #   `CREATE EXTENSION uxid` and checks the version as `migration` does.
 #
-# The version every job checks is `default_version` in uxid.control, and the
-# script it installs is `uxid--<that version>.sql`.
+# The version `migration` and `pg-tle` check is `default_version` in
+# uxid.control, and the script they install is `uxid--<that version>.sql`.
 #
 # Every action is pinned to a full commit SHA, with its version in a
 # trailing comment, and the pgxn/pgxn-tools image (linux/amd64) by its
@@ -199,9 +199,12 @@ jobs:
           sudo pg_ctlcluster 17 test restart
           psql -X -v ON_ERROR_STOP=1 -tA -c 'SHOW shared_preload_libraries'
 
-      # The script reaches the server as one psql variable, interpolated as
-      # a quoted literal (:'script'), so its text needs no dollar-quote tag
-      # and nothing in it is read as SQL by this step.
+      # psql reads the script file itself (`\set script` with the file's
+      # contents from `cat`, the file name passed shell-quoted as :'file'),
+      # so the script never travels as a command-line argument, and it
+      # reaches the server as one variable interpolated as a quoted literal
+      # (:'script'): its text needs no dollar-quote tag and nothing in it is
+      # read as SQL by this step.
       # No uxid control file is installed on this server, so
       # CREATE EXTENSION uxid uses the one pg_tle holds.
       - name: Install the extension through pgtle.install_extension and create it
@@ -214,7 +217,8 @@ jobs:
           createdb tle
           psql -X -v ON_ERROR_STOP=1 -d tle \
             -v version="$version" -v comment="$comment" \
-            -v script="$(cat "uxid--${version}.sql")" <<'SQL'
+            -v file="uxid--${version}.sql" <<'SQL'
+          \set script `cat :'file'`
           CREATE EXTENSION pg_tle;
           SELECT pgtle.install_extension('uxid', :'version', :'comment', :'script');
           CREATE EXTENSION uxid;
