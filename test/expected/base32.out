@@ -1,0 +1,199 @@
+-- The internal helpers under the encoder: the random bytes taken from a
+-- UUID, the random-bytes draw, the size table and the base32 fields.
+\set SHOW_CONTEXT never
+-- The fully random bytes of a UUID are bytes 0 to 5, 7 and 9 to 15; the
+-- fixed UUID below holds its own byte offsets, so the answer names them.
+-- Byte 6 (the version nibble) and byte 8 (the variant bits) never come
+-- back.
+-- sabotage: substring(uuid_bytes FROM 7 FOR 1) in place of FROM 8 FOR 1
+-- -> " 00010203040507090a0b0c0d0e0f | 14" under taken and bytes
+SELECT
+    encode(
+        uxid__uuid_bytes('\x000102030405060708090a0b0c0d0e0f'::bytea), 'hex'
+    ) AS taken,
+    octet_length(
+        uxid__uuid_bytes('\x000102030405060708090a0b0c0d0e0f'::bytea)
+    ) AS bytes;
+            taken             | bytes 
+------------------------------+-------
+ 00010203040507090a0b0c0d0e0f |    14
+(1 row)
+
+-- A version 4 UUID from gen_random_uuid() with every random bit set
+-- would read ff..ff except for its version and variant bytes; those
+-- bytes are exactly the ones left out.
+SELECT
+    encode(
+        uxid__uuid_bytes(
+            '\xffffffffffff4fffbfffffffffffffff'::bytea
+        ),
+        'hex'
+    ) AS taken;
+            taken             
+------------------------------
+ ffffffffffffffffffffffffffff
+(1 row)
+
+-- A draw of n bytes is n bytes long: one UUID covers up to 14 bytes, two
+-- cover up to 28.
+-- sabotage: WHEN n > 28 in place of WHEN n > 14 in uxid__random_bytes
+-- -> " 15 |    15" under n and bytes (14 comes back)
+SELECT
+    n.n,
+    octet_length(uxid__random_bytes(n.n)) AS bytes
+FROM (VALUES (0), (1), (10), (14), (15), (25), (28)) AS n (n)
+ORDER BY n.n;
+ n  | bytes 
+----+-------
+  0 |     0
+  1 |     1
+ 10 |    10
+ 14 |    14
+ 15 |    15
+ 25 |    25
+ 28 |    28
+(7 rows)
+
+-- Two draws of 10 bytes differ (a repeat has probability 2^-80).
+SELECT count(DISTINCT uxid__random_bytes(10)) AS distinct_draws
+FROM generate_series(1, 2);
+ distinct_draws 
+----------------
+              2
+(1 row)
+
+-- A draw outside 0 to 28 bytes is refused.
+SELECT uxid__random_bytes(29);
+ERROR:  uxid: invalid_argument: random bytes are drawn 0 to 28 at a time; got 29
+SELECT uxid__random_bytes(-1);
+ERROR:  uxid: invalid_argument: random bytes are drawn 0 to 28 at a time; got -1
+-- Each size's short and long spelling, NULL (the default, xl) and an
+-- unknown size (NULL).
+SELECT
+    s.size,
+    uxid__size(s.size) AS short_size
+FROM
+    (
+        VALUES
+        ('xs'), ('xsmall'), ('s'), ('small'), ('m'), ('medium'),
+        ('l'), ('large'), ('xl'), ('xlarge'), (NULL), ('XL'), ('huge')
+    ) AS s (size);
+  size  | short_size 
+--------+------------
+ xs     | xs
+ xsmall | xs
+ s      | s
+ small  | s
+ m      | m
+ medium | m
+ l      | l
+ large  | l
+ xl     | xl
+ xlarge | xl
+        | xl
+ XL     | 
+ huge   | 
+(13 rows)
+
+-- The random field's width for each size and time form, as the wire
+-- format's size table gives it, and an explicit width over it.
+-- sabotage: THEN 2 ELSE 3 in place of THEN 3 ELSE 2 for s in
+-- uxid__rand_width -> " s    | f       |     2 |              4"
+SELECT
+    s.size,
+    c.compact,
+    uxid__rand_width(s.size, c.compact, NULL, FALSE) AS width,
+    uxid__rand_width(s.size, c.compact, 4, FALSE) AS explicit_width
+FROM (VALUES ('xs'), ('s'), ('m'), ('l'), ('xl')) AS s (size)
+CROSS JOIN (VALUES (FALSE), (TRUE)) AS c (compact)
+ORDER BY c.compact, uxid__rand_width(s.size, c.compact, NULL, FALSE);
+ size | compact | width | explicit_width 
+------+---------+-------+----------------
+ xs   | f       |     0 |              4
+ s    | f       |     2 |              4
+ m    | f       |     5 |              4
+ l    | f       |     7 |              4
+ xl   | f       |    10 |              4
+ xs   | t       |     1 |              4
+ s    | t       |     3 |              4
+ m    | t       |     6 |              4
+ l    | t       |     8 |              4
+ xl   | t       |    10 |              4
+(10 rows)
+
+-- With no compact given (NULL), a monotonic xs is compact and every other
+-- request is standard.
+SELECT
+    uxid__compact('xs', NULL, TRUE) AS monotonic_xs,
+    uxid__compact('s', NULL, TRUE) AS monotonic_s,
+    uxid__compact('xs', NULL, FALSE) AS plain_xs,
+    uxid__compact('xs', FALSE, TRUE) AS explicit_standard_xs;
+ monotonic_xs | monotonic_s | plain_xs | explicit_standard_xs 
+--------------+-------------+----------+----------------------
+ t            | f           | f        | f
+(1 row)
+
+-- The time field: 1700000000000 ms is 01hf7yat00 standard and hf7yat00
+-- compact (the wire format's example); 0 and 2^48 - 1 are the ends of
+-- standard time; compact keeps the low 40 bits only.
+-- sabotage: CASE WHEN compact THEN 9 in place of THEN 8 in
+-- uxid__base32_time -> " 1700000000000 | 01hf7yat00 | hf7yat00" under
+-- the first row
+SELECT
+    t.ms,
+    uxid__base32_time(t.ms, FALSE) AS standard,
+    uxid__base32_time(t.ms, TRUE) AS compact
+FROM
+    (
+        VALUES
+        (1700000000000::bigint),
+        (0::bigint),
+        (281474976710655::bigint),
+        (1099511627775::bigint),
+        (1099511627776::bigint)
+    ) AS t (ms);
+       ms        |  standard  | compact  
+-----------------+------------+----------
+   1700000000000 | 01hf7yat00 | hf7yat00
+               0 | 0000000000 | 00000000
+ 281474976710655 | 7zzzzzzzzz | zzzzzzzz
+   1099511627775 | 00zzzzzzzz | zzzzzzzz
+   1099511627776 | 0100000000 | 00000000
+(5 rows)
+
+-- The random field: ceil(8 x bytes / 5) characters, most significant bit
+-- first, and a short last group written as its raw value (0xffff is zzz1,
+-- never zzzg).
+-- sabotage: 5 in place of least(5, 8 * field.bytes - 5 * g.i) in
+-- uxid__base32_bytes -> " ffff                 | zzz1             |     4"
+SELECT
+    encode(b.rand, 'hex') AS hex,
+    uxid__base32_bytes(b.rand) AS field,
+    length(uxid__base32_bytes(b.rand)) AS chars
+FROM
+    (
+        VALUES
+        (''::bytea),
+        ('\x01'::bytea),
+        ('\xff'::bytea),
+        ('\xffff'::bytea),
+        ('\x0123'::bytea),
+        ('\xffffff'::bytea),
+        ('\x0123456789'::bytea),
+        ('\xffffffffffffff'::bytea),
+        ('\x0123456789abcdef0123'::bytea)
+    ) AS b (rand)
+ORDER BY octet_length(b.rand), b.rand;
+         hex          |      field       | chars 
+----------------------+------------------+-------
+                      |                  |     0
+ 01                   | 01               |     2
+ ff                   | z7               |     2
+ 0123                 | 04h1             |     4
+ ffff                 | zzz1             |     4
+ ffffff               | zzzzf            |     5
+ 0123456789           | 04hmasw9         |     8
+ ffffffffffffff       | zzzzzzzzzzz1     |    12
+ 0123456789abcdef0123 | 04hmasw9nf6yy093 |    16
+(9 rows)
+

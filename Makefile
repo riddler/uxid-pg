@@ -5,7 +5,7 @@ DATA = uxid--1.0.0.sql
 
 # One name per test/sql/<name>.sql, with its expected output in
 # test/expected/<name>.out.
-REGRESS = version
+REGRESS = version surface base32 encode check_request generate binding
 REGRESS_OPTS = --inputdir=test
 
 PG_CONFIG ?= pg_config

@@ -1,2 +1,6 @@
 [sqlfluff]
 dialect = postgres
+# sqlfluff skips a file over 20000 bytes by default, reporting a warning
+# and passing it; the extension script is larger than that. 0 removes the
+# limit, so every file is linted whatever its size.
+large_file_skip_byte_limit = 0

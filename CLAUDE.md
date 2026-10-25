@@ -155,17 +155,21 @@ CSPRNG. It installs by `CREATE EXTENSION uxid` (relocatable, with
 it), by running the extension script once as a plain migration, or through
 pg_tle's `pgtle.install_extension` on managed services.
 
-The tree on `main` today holds the build and the gate around an almost
-empty extension: the control file (`uxid.control`), the 1.0.0 extension
-script (`uxid--1.0.0.sql`), which defines only `uxid_version()`, the PGXS
-`Makefile`, one `pg_regress` test under `test/`, `mise.toml` with the gate
+The tree on `main` today holds the build and the gate around the first
+part of the extension: the control file (`uxid.control`), the 1.0.0
+extension script (`uxid--1.0.0.sql`), which defines `uxid_version()`,
+time-based generation (`uxid_generate`, the pure encoder `uxid_encode` and
+the request check `uxid_check_request`) and their internal `uxid__`
+helpers, the PGXS `Makefile`, a `pg_regress` test per function under
+`test/` beside the surface test, `mise.toml` with the gate
 tasks, the gate's Docker image and its scripts under `docker/`, the CI and
 release workflows under `.github/workflows/`, the sqlfluff configuration
 (`.sqlfluff`), `LICENSE`, `CHANGELOG.md` and `changelog.d/`, beside these
 agent instructions, the wurk manifest (`.claude/wurk.json`), the Claude
 Code settings (`.claude/settings.json`) and the tracker files under
-`.beads/`. The identifier functions, the `uxid` domain and the vendored
-corpus arrive with later changes; until they do,
+`.beads/`. Deterministic and monotonic generation, decoding, the validity
+checks, the `uxid` domain and the vendored corpus arrive with later
+changes; until they do,
 the sentences in this file about those describe the target, not the
 current tree.
 
@@ -213,7 +217,9 @@ SQL-standard function bodies (`BEGIN ATOMIC ... END` and `RETURN`), the
 form the extension's functions are bound in, so the `pg_format` check mode, the fallback for a construct sqlfluff cannot
 parse, is not used. No sqlfluff rule is disabled and no file is excluded
 from the lint (decided by the conductor under a standing consent,
-2026-10-24).
+2026-10-24). sqlfluff skips a file over 20000 bytes by default, with a
+warning and a pass; `.sqlfluff` sets `large_file_skip_byte_limit = 0` so
+the extension script, which is larger, is linted whole.
 
 There is no line-coverage floor: no token-free tool measures SQL and PL/pgSQL
 function bodies. In its place stand a surface test (the extension's functions
