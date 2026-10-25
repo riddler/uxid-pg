@@ -89,8 +89,8 @@ INNER JOIN pg_extension AS e
 WHERE e.extname = 'uxid'
 ORDER BY p.proname;
 
--- Every function except the raise helper is LANGUAGE sql with a BEGIN
--- ATOMIC body (prosqlbody set), so its callees are bound when it is
+-- Every function except the two raise helpers is LANGUAGE sql with a
+-- BEGIN ATOMIC body (prosqlbody set), so its callees are bound when it is
 -- created.
 -- sabotage: write uxid__compact with a string body (AS $c$ ... $c$)
 -- -> " uxid__compact      | f" under bound
@@ -127,3 +127,29 @@ INNER JOIN pg_depend AS d
 INNER JOIN pg_extension AS e
     ON d.refobjid = e.oid
 WHERE e.extname = 'uxid';
+
+-- The extension's one type, the uxid domain over text, read from the
+-- catalog with its collation and comment (its array type, which
+-- PostgreSQL makes beside it, left out).
+-- sabotage: drop the COMMENT ON DOMAIN uxid
+-- -> " uxid    | d       | C        | text      | f" under commented
+SELECT
+    t.typname,
+    t.typtype,
+    c.collname,
+    format_type(t.typbasetype, t.typtypmod) AS base_type,
+    obj_description(t.oid, 'pg_type') IS NOT NULL AS commented
+FROM pg_type AS t
+INNER JOIN pg_depend AS d
+    ON
+        d.classid = 'pg_type'::regclass
+        AND t.oid = d.objid
+        AND d.deptype = 'e'
+INNER JOIN pg_extension AS e
+    ON d.refobjid = e.oid
+LEFT JOIN pg_collation AS c
+    ON t.typcollation = c.oid
+WHERE
+    e.extname = 'uxid'
+    AND t.typcategory <> 'A'
+ORDER BY t.typname;

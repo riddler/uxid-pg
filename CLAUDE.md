@@ -160,17 +160,19 @@ part of the extension: the control file (`uxid.control`), the 1.0.0
 extension script (`uxid--1.0.0.sql`), which defines `uxid_version()`,
 time-based generation (`uxid_generate`, the pure encoder `uxid_encode` and
 the request check `uxid_check_request`), deterministic generation
-(`uxid_from`) and their internal `uxid__` helpers, the PGXS `Makefile`, a
-`pg_regress` test per function under `test/` beside the surface test,
+(`uxid_from`), decoding (`uxid_decode`, the pure decoder `uxid_decode_at`
+and `uxid_decode_error`), the validity checks (`uxid_is_valid` and
+`uxid_is_deterministic`), the `uxid` domain and their internal `uxid__`
+helpers, the PGXS `Makefile`, a `pg_regress` test per function under
+`test/` beside the surface test,
 `mise.toml` with the gate tasks, the gate's Docker image and its scripts
 under `docker/`, the CI and release workflows under `.github/workflows/`,
 the sqlfluff configuration (`.sqlfluff`), `LICENSE`, `CHANGELOG.md` and
 `changelog.d/`, beside these agent instructions, the wurk manifest
 (`.claude/wurk.json`), the Claude Code settings (`.claude/settings.json`)
-and the tracker files under `.beads/`. Monotonic generation, decoding, the
-validity checks, the `uxid` domain and the vendored corpus arrive with
-later changes; until they do, the sentences in this file about those
-describe the target, not the current tree.
+and the tracker files under `.beads/`. Monotonic generation and the
+vendored corpus arrive with later changes; until they do, the sentences in
+this file about those describe the target, not the current tree.
 
 - **The extension is `uxid`.** Version 1.0.0 is its first release, a GitHub
   release on the tag `v1.0.0`.

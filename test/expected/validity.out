@@ -1,0 +1,187 @@
+-- uxid_is_valid and uxid_is_deterministic: whether an id decodes, and
+-- whether it is a well-formed deterministic id. Neither reads a clock.
+-- Both ask for a full well-formed decode (the length table and the
+-- alphabet), which is stricter than the reference's valid? (any body of
+-- 10 characters or more in the alphabet) and deterministic? (the first
+-- body character alone).
+-- Every corpus decode input is valid, and every corpus decode refusal is
+-- not; the deterministic inputs are deterministic.
+-- sabotage: WHEN uxid__body_error(...) IS NOT NULL THEN FALSE dropped from
+-- uxid_is_valid -> " invalid | t         | t         | f"
+SELECT
+    c.kind,
+    bool_and(uxid_is_valid(c.input)) AS all_valid,
+    bool_or(uxid_is_valid(c.input)) AS any_valid,
+    bool_or(uxid_is_deterministic(c.input)) AS any_deterministic
+FROM
+    (
+        VALUES
+        ('time', 'usr_01hf7yat0004hmasw9nf6yy093'),
+        ('time', 'usr_hf7yat0004hmasw9nf6yy093'),
+        ('time', 'usr_01hf7yat0004hmasw9nf61'),
+        ('time', 'usr_hf7yat0004hmasw9nf6yf'),
+        ('time', 'usr_01hf7yat0004hmasw9'),
+        ('time', 'usr_hf7yat0004hmasw9n3'),
+        ('time', 'usr_01hf7yat0004h1'),
+        ('time', 'usr_hf7yat0004hm5'),
+        ('time', 'usr_01hf7yat00'),
+        ('time', 'usr_hf7yat0001'),
+        ('time', 'usr_01HF7YAT0004HMASW9NF6YY093'),
+        ('time', '01hf7yat0004hmasw9nf6yy093'),
+        ('time', 'a_b_01hf7yat000001'),
+        ('time', 'usr_yzzzzzzz04hm5'),
+        ('invalid', ''),
+        ('invalid', 'usr_'),
+        ('invalid', 'a_b_'),
+        ('invalid', '_'),
+        ('invalid', 'usr_01hf7yat000'),
+        ('invalid', 'usr_01hf7yat00000g40r40m30e20'),
+        ('invalid', 'usr_01hf7yat00000g40r40m30e2090'),
+        ('invalid', 'usr'),
+        ('invalid', 'usr_01hu7yat00000g40r40m30e209'),
+        ('invalid', 'usr_01hf7yat00000g4lr40m30e209'),
+        ('invalid', 'usr_01hf7yat00000g40r40mO0e209'),
+        ('invalid', 'usr_01hf7yat00-00g40r40m30e209'),
+        ('invalid', 'usr_zcvt7epac0t1ebcsjfyf7cwzi5'),
+        ('invalid', 'usr_01hf7yat00u')
+    ) AS c (kind, input)
+GROUP BY c.kind
+ORDER BY c.kind;
+  kind   | all_valid | any_valid | any_deterministic 
+---------+-----------+-----------+-------------------
+ invalid | f         | f         | f
+ time    | t         | t         | f
+(2 rows)
+
+-- sabotage: ascii(...) IN (122) in place of IN (90, 122) in
+-- uxid_is_deterministic -> " usr_ZCVT7EPAC0T1EBCSJFYF7CWZ25 | t        | f"
+SELECT
+    c.input,
+    uxid_is_valid(c.input) AS id_valid,
+    uxid_is_deterministic(c.input) AS id_deterministic
+FROM
+    (
+        VALUES
+        ('usr_zcvt7epac0t1ebcsjfyf7cwz25'),
+        ('cus_zt9vnyfd85bff0'),
+        ('zqz4cwzgyw8ks97869'),
+        ('usr_ZCVT7EPAC0T1EBCSJFYF7CWZ25')
+    ) AS c (input)
+ORDER BY c.input;
+             input              | id_valid | id_deterministic 
+--------------------------------+----------+------------------
+ cus_zt9vnyfd85bff0             | t        | t
+ usr_zcvt7epac0t1ebcsjfyf7cwz25 | t        | t
+ usr_ZCVT7EPAC0T1EBCSJFYF7CWZ25 | t        | t
+ zqz4cwzgyw8ks97869             | t        | t
+(4 rows)
+
+-- Stricter than the reference: a body in the alphabet of a length the
+-- table does not hold (11, 25, 27, 30 characters) is not valid, and a
+-- marker body is deterministic only when it is well formed.
+-- sabotage: 25 added to the length table in uxid__body_error
+-- -> " usr_01hf7yat00000g40r40m30e20      | t        | f"
+SELECT
+    c.input,
+    uxid_is_valid(c.input) AS id_valid,
+    uxid_is_deterministic(c.input) AS id_deterministic
+FROM
+    (
+        VALUES
+        ('usr_01hf7yat000'),
+        ('usr_01hf7yat00000g40r40m30e20'),
+        ('usr_01hf7yat00000g40r40m30e2090'),
+        ('usr_01hf7yat0004hmasw9nf6yy0930000'),
+        ('usr_zcvt7epac0t1ebcsjfyf7cwz2'),
+        ('usr_zcvt7epac0t1ebcsjfyf7cwzi5'),
+        ('usr_z')
+    ) AS c (input)
+ORDER BY c.input;
+               input                | id_valid | id_deterministic 
+------------------------------------+----------+------------------
+ usr_01hf7yat000                    | f        | f
+ usr_01hf7yat00000g40r40m30e20      | f        | f
+ usr_01hf7yat00000g40r40m30e2090    | f        | f
+ usr_01hf7yat0004hmasw9nf6yy0930000 | f        | f
+ usr_z                              | f        | f
+ usr_zcvt7epac0t1ebcsjfyf7cwz2      | f        | f
+ usr_zcvt7epac0t1ebcsjfyf7cwzi5     | f        | f
+(7 rows)
+
+-- required_prefix: the decoded prefix must equal it; NULL or the empty
+-- string asks for none. The prefix is everything before the last
+-- delimiter, so a_b is the prefix of a_b_01hf7yat000001, not a.
+-- sabotage: the prefix compared with LIKE required_prefix || '%' in
+-- place of = -> " usr_01hf7yat0004h1 | us | t" under id_valid
+SELECT
+    c.input,
+    c.required_prefix,
+    uxid_is_valid(c.input, '_', c.required_prefix) AS id_valid
+FROM
+    (
+        VALUES
+        ('usr_01hf7yat0004h1', 'usr'),
+        ('usr_01hf7yat0004h1', 'doc'),
+        ('usr_01hf7yat0004h1', 'us'),
+        ('usr_01hf7yat0004h1', 'USR'),
+        ('usr_01hf7yat0004h1', NULL),
+        ('usr_01hf7yat0004h1', ''),
+        ('01hf7yat0004h1', 'usr'),
+        ('01hf7yat0004h1', NULL),
+        ('_01hf7yat0004h1', 'usr'),
+        ('a_b_01hf7yat000001', 'a_b'),
+        ('a_b_01hf7yat000001', 'a'),
+        ('usr_0lhf7yat0004h1', 'usr')
+    ) AS c (input, required_prefix)
+ORDER BY c.input, c.required_prefix NULLS FIRST;
+       input        | required_prefix | id_valid 
+--------------------+-----------------+----------
+ _01hf7yat0004h1    | usr             | f
+ 01hf7yat0004h1     |                 | t
+ 01hf7yat0004h1     | usr             | f
+ a_b_01hf7yat000001 | a               | f
+ a_b_01hf7yat000001 | a_b             | t
+ usr_01hf7yat0004h1 |                 | t
+ usr_01hf7yat0004h1 |                 | t
+ usr_01hf7yat0004h1 | doc             | f
+ usr_01hf7yat0004h1 | us              | f
+ usr_01hf7yat0004h1 | usr             | t
+ usr_01hf7yat0004h1 | USR             | f
+ usr_0lhf7yat0004h1 | usr             | f
+(12 rows)
+
+-- The delimiter: an id is read with the delimiter given, a NULL one is the
+-- default _, and an empty one makes every id invalid and not
+-- deterministic (never an error).
+SELECT
+    uxid_is_valid('doc--01hf7yat0004h1', '--', 'doc') AS dash_valid,
+    uxid_is_valid('doc--01hf7yat0004h1') AS dash_under_default,
+    uxid_is_deterministic('doc--zt9vnyfd85bff0', '--') AS dash_deterministic,
+    uxid_is_valid('usr_01hf7yat0004h1', NULL) AS null_delimiter,
+    uxid_is_valid('usr_01hf7yat0004h1', '') AS empty_delimiter,
+    uxid_is_deterministic('usr_zt9vnyfd85bff0', '') AS empty_det;
+ dash_valid | dash_under_default | dash_deterministic | null_delimiter | empty_delimiter | empty_det 
+------------+--------------------+--------------------+----------------+-----------------+-----------
+ t          | f                  | t                  | t              | f               | f
+(1 row)
+
+-- A NULL id answers NULL from both, so a NULL in a uxid column passes the
+-- domain's check (NOT NULL is the column's to ask).
+-- sabotage: WHEN id IS NULL THEN NULL dropped from uxid_is_valid
+-- -> " t          | " under null_valid
+SELECT
+    uxid_is_valid(NULL) AS null_valid,
+    uxid_is_deterministic(NULL) AS null_deterministic;
+ null_valid | null_deterministic 
+------------+--------------------
+            | 
+(1 row)
+
+-- A compact body is valid with no clock to read: the checks are
+-- IMMUTABLE, and the compact time is never decoded.
+SELECT uxid_is_valid('usr_hf7yat0004hmasw9nf6yy093') AS compact_valid;
+ compact_valid 
+---------------
+ t
+(1 row)
+

@@ -7,9 +7,9 @@
 -- LANGUAGE sql with a BEGIN ATOMIC body, which binds its callees when it
 -- is created, so the extension works with its schema off the caller's
 -- search_path, after ALTER EXTENSION uxid SET SCHEMA, and under the empty
--- search_path a dump restore uses. The one PL/pgSQL function,
--- uxid__raise, calls nothing. A function is created after every function
--- it calls.
+-- search_path a dump restore uses. The two PL/pgSQL functions, the
+-- raise helpers uxid__raise and uxid__raise_decode, call nothing. A
+-- function is created after every function it calls.
 --
 -- Functions whose names start uxid__ (two underscores) are internal
 -- helpers, not part of the public surface.
@@ -669,3 +669,452 @@ COMMENT ON FUNCTION uxid_from(text, text, text, text, text) IS
 'lower case is the default and upper case changes the body only. Refuses '
 'as uxid_check_request does, before the key is read. Defaults: size xl, '
 'lower case, delimiter _.';
+
+-- Raises a decode refusal: SQLSTATE 22P02 (invalid_text_representation)
+-- with the message "uxid: <reason>", the reason empty, invalid_length or
+-- invalid_character. VOLATILE for the reason uxid__raise is.
+CREATE FUNCTION uxid__raise_decode(reason text)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE PARALLEL SAFE
+AS $raise_decode$
+BEGIN
+    RAISE EXCEPTION USING
+        ERRCODE = 'invalid_text_representation',
+        MESSAGE = 'uxid: ' || reason;
+END;
+$raise_decode$;
+
+COMMENT ON FUNCTION uxid__raise_decode(text) IS
+'Internal helper of the uxid extension, not part of its public surface: '
+'raises SQLSTATE 22P02 with the message "uxid: <reason>".';
+
+-- The splits below scan the id left to right for the delimiter, matches
+-- not overlapping, as the reference's String.split does: the body is the
+-- part after the last match, the prefix the parts before it joined by
+-- the delimiter. A NULL delimiter is the default _. The text operations
+-- that read a collation name COLLATE "C", so the result never depends on
+-- the collation of the arguments (a uxid value carries "C", a literal
+-- the database's); the marker is read by its code point (ascii), which
+-- reads no collation.
+
+-- The body of an id: everything after the last delimiter, the whole
+-- string when it has none, and NULL for a NULL id.
+CREATE FUNCTION uxid__body(id text, delimiter text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE PARALLEL SAFE
+BEGIN ATOMIC
+    SELECT
+        CASE
+            WHEN part.parts IS NULL THEN NULL
+            ELSE coalesce(part.parts[cardinality(part.parts)], '')
+        END AS body
+    FROM
+        (
+            SELECT
+                string_to_array(
+                    id COLLATE "C", coalesce(delimiter, '_') COLLATE "C"
+                ) AS parts
+        ) AS part;
+END;
+
+COMMENT ON FUNCTION uxid__body(text, text) IS
+'Internal helper of the uxid extension, not part of its public surface: '
+'the body of an id, everything after the last delimiter (the whole '
+'string when there is none).';
+
+-- The prefix of an id: everything before the last delimiter, the empty
+-- string for an id that starts with it, and NULL for an id with no
+-- delimiter or a NULL id.
+CREATE FUNCTION uxid__prefix(id text, delimiter text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE PARALLEL SAFE
+BEGIN ATOMIC
+    SELECT
+        CASE
+            WHEN cardinality(part.parts) > 1
+                THEN
+                    array_to_string(
+                        part.parts[1:cardinality(part.parts) - 1],
+                        part.joiner
+                    )
+        END AS prefix_part
+    FROM
+        (
+            SELECT
+                coalesce(delimiter, '_') AS joiner,
+                string_to_array(
+                    id COLLATE "C", coalesce(delimiter, '_') COLLATE "C"
+                ) AS parts
+        ) AS part;
+END;
+
+COMMENT ON FUNCTION uxid__prefix(text, text) IS
+'Internal helper of the uxid extension, not part of its public surface: '
+'the prefix of an id, everything before the last delimiter; NULL when '
+'there is no delimiter.';
+
+-- The first rule a body breaks, checked in the order the wire format's
+-- Refusals section states (empty, invalid_length, invalid_character), or
+-- NULL for a well-formed body and for NULL. The length is the body's
+-- UTF-8 byte count whatever the database encoding (in a SQL_ASCII
+-- database, the stored bytes), and the table is the wire format's
+-- length table: 10, 13, 14, 18, 21, 22, 24 and 26.
+CREATE FUNCTION uxid__body_error(body text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE PARALLEL SAFE
+BEGIN ATOMIC
+    SELECT
+        CASE
+            WHEN octet_length(body) = 0 THEN 'empty'
+            WHEN
+                octet_length(convert_to(body, 'UTF8'))
+                NOT IN (10, 13, 14, 18, 21, 22, 24, 26)
+                THEN 'invalid_length'
+            WHEN
+                body COLLATE "C"
+                !~ '^[0123456789ABCDEFGHJKMNPQRSTVWXYZabcdefghjkmnpqrstvwxyz]+$'
+                THEN 'invalid_character'
+        END;
+END;
+
+COMMENT ON FUNCTION uxid__body_error(text) IS
+'Internal helper of the uxid extension, not part of its public surface: '
+'the first rule a body breaks (empty, invalid_length, invalid_character, '
+'in that order) or NULL for a well-formed body.';
+
+-- The integer a run of base32 characters of either case spells, most
+-- significant character first, 5 bits each. Read only from a checked
+-- body, at most 10 characters (50 bits).
+CREATE FUNCTION uxid__base32_value(chars text)
+RETURNS bigint
+LANGUAGE sql
+IMMUTABLE PARALLEL SAFE
+BEGIN ATOMIC
+    SELECT
+        coalesce(
+            bit_or(
+                (strpos(lc.alphabet, substr(lc.symbols, g.i, 1)) - 1)::bigint
+                << (5 * (length(lc.symbols) - g.i))
+            ),
+            0
+        ) AS symbol_value
+    FROM
+        (
+            SELECT
+                '0123456789abcdefghjkmnpqrstvwxyz' COLLATE "C" AS alphabet,
+                translate(
+                    chars,
+                    'ABCDEFGHJKMNPQRSTVWXYZ',
+                    'abcdefghjkmnpqrstvwxyz'
+                ) COLLATE "C" AS symbols
+        ) AS lc
+    CROSS JOIN LATERAL generate_series(1, length(lc.symbols)) AS g (i);
+END;
+
+COMMENT ON FUNCTION uxid__base32_value(text) IS
+'Internal helper of the uxid extension, not part of its public surface: '
+'the integer a run of base32 characters of either case spells, most '
+'significant first.';
+
+-- The full time of a compact time field (its low 40 bits) against a
+-- clock, as the wire format's "Decoding the time" states: the clock's
+-- bits above bit 40 with the 40 decoded bits, less 2^40 when that is
+-- more than one day (86400000 ms) ahead of the clock. There is no clamp
+-- at zero: a clock in the first 2^40 ms window can give a negative time.
+CREATE FUNCTION uxid__compact_time(low_ms bigint, clock_ms bigint)
+RETURNS bigint
+LANGUAGE sql
+IMMUTABLE PARALLEL SAFE
+BEGIN ATOMIC
+    SELECT
+        CASE
+            WHEN t.full_ms - t.clock > 86400000
+                THEN t.full_ms - 1099511627776
+            ELSE t.full_ms
+        END AS decoded_ms
+    FROM
+        (
+            SELECT
+                clock_ms AS clock,
+                (clock_ms & ~1099511627775::bigint) | low_ms AS full_ms
+        ) AS t;
+END;
+
+COMMENT ON FUNCTION uxid__compact_time(bigint, bigint) IS
+'Internal helper of the uxid extension, not part of its public surface: '
+'the full time of a compact time field against a clock, one 2^40 ms '
+'window back when it would be more than a day ahead of the clock.';
+
+-- The pure decoder. Refuses an empty delimiter with invalid_argument
+-- (22023); then a malformed body with 22P02 and its reason, in the order
+-- empty, invalid_length, invalid_character; then a compact time body
+-- with a NULL clock or one outside 0 to 2^48 - 1, with invalid_argument.
+-- The size and time form come from the body length alone (10 and 18 read
+-- as standard, so a compact xs or m id decodes with a wrong time, as the
+-- wire format says). A body starting with z or Z is deterministic and
+-- has no time; its compact flag is the length table's, as the reference
+-- reports it. A standard time is the first 10 characters' low 48 bits.
+CREATE FUNCTION uxid_decode_at(
+    id text,
+    clock_ms bigint,
+    delimiter text DEFAULT '_'
+)
+RETURNS TABLE (
+    prefix text,
+    size text,
+    compact boolean,
+    deterministic boolean,
+    time_ms bigint
+)
+LANGUAGE sql
+IMMUTABLE PARALLEL SAFE
+BEGIN ATOMIC
+    SELECT
+        CASE
+            WHEN octet_length(delimiter) = 0
+                THEN
+                    uxid__raise(
+                        'invalid_argument', 'delimiter must not be empty'
+                    )
+        END;
+    SELECT
+        CASE
+            WHEN chk.reason IS NOT NULL THEN uxid__raise_decode(chk.reason)
+        END
+    FROM
+        (
+            SELECT uxid__body_error(uxid__body(id, delimiter)) AS reason
+        ) AS chk;
+    SELECT
+        CASE
+            WHEN
+                b.needs_clock
+                AND (
+                    b.clock IS NULL
+                    OR b.clock < 0
+                    OR b.clock > 281474976710655
+                )
+                THEN
+                    uxid__raise(
+                        'invalid_argument',
+                        format(
+                            'a compact time needs a clock_ms from 0 to '
+                            '281474976710655; got %s',
+                            coalesce(b.clock::text, 'NULL')
+                        )
+                    )
+        END
+    FROM
+        (
+            SELECT
+                clock_ms AS clock,
+                octet_length(uxid__body(id, delimiter)) IN (13, 21, 24)
+                AND ascii(uxid__body(id, delimiter)) NOT IN (90, 122)
+                    AS needs_clock
+        ) AS b;
+    SELECT
+        r.id_prefix,
+        r.id_size,
+        r.is_compact,
+        r.is_deterministic,
+        r.id_time_ms
+    FROM
+        (
+            SELECT
+                d.is_compact,
+                d.marker AS is_deterministic,
+                CASE WHEN d.body IS NOT NULL THEN d.body_prefix END
+                    AS id_prefix,
+                CASE octet_length(d.body)
+                    WHEN 10 THEN 'xs'
+                    WHEN 13 THEN 's'
+                    WHEN 14 THEN 's'
+                    WHEN 18 THEN 'm'
+                    WHEN 21 THEN 'l'
+                    WHEN 22 THEN 'l'
+                    WHEN 24 THEN 'xl'
+                    WHEN 26 THEN 'xl'
+                END AS id_size,
+                CASE
+                    WHEN d.body IS NULL OR d.marker THEN NULL
+                    WHEN d.is_compact
+                        THEN
+                            uxid__compact_time(
+                                uxid__base32_value(left(d.body, 8)), d.clock
+                            )
+                    ELSE
+                        uxid__base32_value(left(d.body, 10))
+                        & 281474976710655
+                END AS id_time_ms
+            FROM
+                (
+                    SELECT
+                        b.body,
+                        b.body_prefix,
+                        b.clock,
+                        octet_length(b.body) IN (13, 21, 24) AS is_compact,
+                        ascii(b.body) IN (90, 122) AS marker
+                    FROM
+                        (
+                            SELECT
+                                clock_ms AS clock,
+                                uxid__body(id, delimiter) AS body,
+                                uxid__prefix(id, delimiter) AS body_prefix
+                        ) AS b
+                ) AS d
+        ) AS r;
+END;
+
+COMMENT ON FUNCTION uxid_decode_at(text, bigint, text) IS
+'Decodes an id against the clock clock_ms (ms since the Unix epoch), the '
+'pure decoder: one row of the prefix (NULL for none, the empty string '
+'for an id that starts with the delimiter), the size (xs, s, m, l or '
+'xl), whether the time is compact, whether the body is deterministic, '
+'and the time in ms (NULL for a deterministic body). The body is '
+'everything after the last delimiter. A compact time takes its high bits '
+'from the clock and steps back one 2^40 ms window when it would be more '
+'than a day ahead of it, with no clamp at zero. A malformed body raises '
+'SQLSTATE 22P02 with the message "uxid: empty", "uxid: invalid_length" '
+'or "uxid: invalid_character", checked in that order; an empty '
+'delimiter, or a compact time with a NULL clock or one outside 0 to '
+'2^48 - 1, raises 22023 with invalid_argument. A NULL id gives one row '
+'of NULLs; a NULL delimiter is _.';
+
+CREATE FUNCTION uxid_decode(
+    id text,
+    clock_ms bigint DEFAULT NULL,
+    delimiter text DEFAULT '_'
+)
+RETURNS TABLE (
+    prefix text,
+    size text,
+    compact boolean,
+    deterministic boolean,
+    time_ms bigint
+)
+LANGUAGE sql
+STABLE PARALLEL SAFE
+BEGIN ATOMIC
+    SELECT
+        d.prefix,
+        d.size,
+        d.compact,
+        d.deterministic,
+        d.time_ms
+    FROM
+        (
+            SELECT
+                id AS given_id,
+                delimiter AS given_delimiter,
+                coalesce(
+                    clock_ms,
+                    floor(extract(EPOCH FROM now()) * 1000)::bigint
+                ) AS clock
+        ) AS a
+    CROSS JOIN
+        LATERAL uxid_decode_at(a.given_id, a.clock, a.given_delimiter) AS d;
+END;
+
+COMMENT ON FUNCTION uxid_decode(text, bigint, text) IS
+'Decodes an id as uxid_decode_at does, against clock_ms or, when it is '
+'NULL, the transaction time in ms (now()). Returns one row of the '
+'prefix, size, compact flag, deterministic flag and time (NULL for a '
+'deterministic body); raises SQLSTATE 22P02 with "uxid: empty", '
+'"uxid: invalid_length" or "uxid: invalid_character" for a malformed '
+'body. Defaults: delimiter _.';
+
+CREATE FUNCTION uxid_decode_error(id text, delimiter text DEFAULT '_')
+RETURNS text
+LANGUAGE sql
+IMMUTABLE PARALLEL SAFE
+BEGIN ATOMIC
+    SELECT
+        CASE
+            WHEN id IS NULL THEN NULL
+            WHEN octet_length(delimiter) = 0 THEN 'invalid_argument'
+            ELSE uxid__body_error(uxid__body(id, delimiter))
+        END;
+END;
+
+COMMENT ON FUNCTION uxid_decode_error(text, text) IS
+'The reason uxid_decode refuses an id (empty, invalid_length or '
+'invalid_character, the first that applies in that order), or NULL when '
+'the body is well formed; invalid_argument for an empty delimiter. Never '
+'raises and reads no clock. A NULL id gives NULL; a NULL delimiter is _.';
+
+-- The validity checks read no clock: a well-formed body (the length
+-- table and the alphabet) is all they ask, which is stricter than the
+-- reference's valid?, whose body check takes any length from 10 up.
+CREATE FUNCTION uxid_is_valid(
+    id text,
+    delimiter text DEFAULT '_',
+    required_prefix text DEFAULT NULL
+)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE PARALLEL SAFE
+BEGIN ATOMIC
+    SELECT
+        CASE
+            WHEN id IS NULL THEN NULL
+            WHEN octet_length(delimiter) = 0 THEN FALSE
+            WHEN uxid__body_error(uxid__body(id, delimiter)) IS NOT NULL
+                THEN FALSE
+            WHEN coalesce(octet_length(required_prefix), 0) = 0 THEN TRUE
+            ELSE
+                coalesce(
+                    uxid__prefix(id, delimiter) COLLATE "C"
+                    = required_prefix COLLATE "C",
+                    FALSE
+                )
+        END;
+END;
+
+COMMENT ON FUNCTION uxid_is_valid(text, text, text) IS
+'Whether an id decodes: its body (everything after the last delimiter) '
+'is well formed, every character in the alphabet of either case and its '
+'length in the wire format''s length table, which is stricter than the '
+'reference''s check of any length from 10 up. With a required_prefix '
+'(NULL or the empty string is none), the id''s prefix must also equal it. '
+'Reads no clock. False for an empty delimiter; NULL for a NULL id, so a '
+'NULL passes the uxid domain''s check. A NULL delimiter is _.';
+
+CREATE FUNCTION uxid_is_deterministic(id text, delimiter text DEFAULT '_')
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE PARALLEL SAFE
+BEGIN ATOMIC
+    SELECT
+        CASE
+            WHEN id IS NULL THEN NULL
+            WHEN octet_length(delimiter) = 0 THEN FALSE
+            WHEN uxid__body_error(uxid__body(id, delimiter)) IS NOT NULL
+                THEN FALSE
+            ELSE ascii(uxid__body(id, delimiter)) IN (90, 122)
+        END;
+END;
+
+COMMENT ON FUNCTION uxid_is_deterministic(text, text) IS
+'Whether an id is a well-formed deterministic id: its body decodes (as '
+'uxid_is_valid asks) and starts with the marker z or Z. Stricter than '
+'the reference''s check, which reads the first body character alone. '
+'Reads no clock. False for an empty delimiter; NULL for a NULL id. A NULL '
+'delimiter is _.';
+
+-- The uxid type: text that must decode. COLLATE "C" compares bytes, and
+-- the alphabet is in ASCII order, so lower-case (or upper-case) ids of
+-- one prefix and size sort by time, then random field; a linguistic
+-- collation may skip the delimiter or fold case and break that order.
+-- The check calls a bound function, so it holds under a dump restore's
+-- empty search_path and after ALTER EXTENSION uxid SET SCHEMA.
+CREATE DOMAIN uxid AS text COLLATE "C" CHECK (uxid_is_valid(value));
+
+COMMENT ON DOMAIN uxid IS
+'A uxid id stored as text with COLLATE "C": a value must pass '
+'uxid_is_valid with the default delimiter _, and ids of one prefix, size '
+'and letter case sort by time. Every uxid function takes and returns '
+'plain text, so a text column works unchanged.';

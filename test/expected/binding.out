@@ -40,6 +40,46 @@ SELECT public.uxid_version();
  1.0.0
 (1 row)
 
+SELECT
+    d.prefix,
+    d.size,
+    d.compact,
+    d.deterministic,
+    d.time_ms
+FROM public.uxid_decode_at('usr_hf7yat0004hm5', 1700000000000) AS d;
+ prefix | size | compact | deterministic |    time_ms    
+--------+------+---------+---------------+---------------
+ usr    | s    | t       | f             | 1700000000000
+(1 row)
+
+SELECT
+    d.prefix,
+    d.size,
+    d.compact,
+    d.deterministic,
+    d.time_ms
+FROM public.uxid_decode('usr_01hf7yat0004h1') AS d;
+ prefix | size | compact | deterministic |    time_ms    
+--------+------+---------+---------------+---------------
+ usr    | s    | f       | f             | 1700000000000
+(1 row)
+
+SELECT public.uxid_decode_error('usr_01hf7yat00u');
+ uxid_decode_error 
+-------------------
+ invalid_length
+(1 row)
+
+SELECT
+    public.uxid_is_valid('usr_01hf7yat0004h1', '_', 'usr') AS id_valid,
+    public.uxid_is_deterministic('usr_z5rtsrkhx2h4dr') AS id_deterministic;
+ id_valid | id_deterministic 
+----------+------------------
+ t        | t
+(1 row)
+
+SELECT d.prefix FROM public.uxid_decode('usr_') AS d;
+ERROR:  uxid: empty
 -- The empty search_path, as a dump restore sets it.
 SET search_path = '';
 SELECT public.uxid_encode('usr', 's', 1700000000000, '\x0123'::bytea);
@@ -62,6 +102,30 @@ SELECT length(public.uxid_generate()) AS generated_length;
 
 SELECT public.uxid_check_request(delimiter => '');
 ERROR:  uxid: invalid_argument: delimiter must not be empty
+SELECT
+    d.prefix,
+    d.size,
+    d.compact,
+    d.deterministic,
+    d.time_ms
+FROM public.uxid_decode_at('usr_hf7yat0004hm5', 1700000000000) AS d;
+ prefix | size | compact | deterministic |    time_ms    
+--------+------+---------+---------------+---------------
+ usr    | s    | t       | f             | 1700000000000
+(1 row)
+
+SELECT public.uxid_is_valid('usr_01hf7yat0004h1', '_', 'usr') AS id_valid;
+ id_valid 
+----------
+ t
+(1 row)
+
+SELECT public.uxid_decode_error('usr_') AS decode_reason;
+ decode_reason 
+---------------
+ empty
+(1 row)
+
 RESET search_path;
 -- After ALTER EXTENSION uxid SET SCHEMA, the functions live in the new
 -- schema and still work with only pg_catalog on the search_path.
@@ -91,6 +155,27 @@ SELECT uxid_moved.uxid_from('usr', 'alice@example.com', 's');
 
 SELECT uxid_moved.uxid_check_request(size => 'huge');
 ERROR:  uxid: invalid_argument: size must be xs, s, m, l or xl (or xsmall, small, medium, large or xlarge); got 'huge'
+SELECT
+    d.prefix,
+    d.size,
+    d.compact,
+    d.deterministic,
+    d.time_ms
+FROM uxid_moved.uxid_decode('usr_hf7yat0004hm5', 1700000000000) AS d;
+ prefix | size | compact | deterministic |    time_ms    
+--------+------+---------+---------------+---------------
+ usr    | s    | t       | f             | 1700000000000
+(1 row)
+
+SELECT
+    uxid_moved.uxid_is_valid('usr_01hf7yat0004h1', '_', 'usr') AS id_valid,
+    uxid_moved.uxid_is_deterministic('usr_z5rtsrkhx2h4dr') AS id_deterministic,
+    uxid_moved.uxid_decode_error('usr_01hf7yat000') AS decode_reason;
+ id_valid | id_deterministic | decode_reason  
+----------+------------------+----------------
+ t        | t                | invalid_length
+(1 row)
+
 SELECT n.nspname
 FROM pg_extension AS e
 INNER JOIN pg_namespace AS n ON e.extnamespace = n.oid

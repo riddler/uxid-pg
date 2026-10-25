@@ -1,0 +1,28 @@
+-- A body's length is counted in UTF-8 bytes whatever the database
+-- encoding, so a non-ASCII body is refused for the same reason in every
+-- database. In a UTF-8 database the stored bytes and the UTF-8 bytes are
+-- one thing: only a database in another encoding tells counting the
+-- stored bytes (wrong) from counting UTF-8 bytes (right).
+\set regress_db :DBNAME
+SET client_encoding = 'UTF8';
+CREATE DATABASE uxid_decode_latin1
+ENCODING 'LATIN1' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0;
+-- In a LATIN1 database U+00E9 is stored as 1 byte and is 2 in UTF-8: the
+-- corpus's two non-ASCII decode cases keep their reasons.
+-- sabotage: octet_length(body) in place of octet_length(convert_to(body,
+-- 'UTF8')) in uxid__body_error -> " invalid_length    | invalid_character"
+-- in place of " invalid_character | invalid_length"
+\c uxid_decode_latin1
+SET client_encoding = 'UTF8';
+CREATE EXTENSION uxid;
+SELECT
+    getdatabaseencoding() AS db_encoding,
+    uxid_decode_error('01hf7yat00000g40r40m30e2é') AS table_length,
+    uxid_decode_error('01hf7yat00000g40r40m30e20é') AS off_table_length;
+ db_encoding |   table_length    | off_table_length 
+-------------+-------------------+------------------
+ LATIN1      | invalid_character | invalid_length
+(1 row)
+
+\c :regress_db
+DROP DATABASE uxid_decode_latin1;
