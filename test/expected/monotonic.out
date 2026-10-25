@@ -413,6 +413,41 @@ SELECT pg_temp.state('uxid.mono_757372_3') AS after_guard_refusal;
  2164663517183:16777215
 (1 row)
 
+-- The compact guard applies to the time the id carries, never to a clock
+-- the id does not carry: with state at 1700000000000, a clock moved back
+-- to 1065151889408 (whose compact time would start with the
+-- deterministic marker) gives an id at the last time, its value stepped
+-- by 1 to 2^(4w) (here 1 to 4096), as the second rule says.
+-- sabotage: time_ms => time_ms in place of the CASE that passes an
+-- in-range time as 0 in uxid_monotonic's first statement -> "ERROR:
+-- uxid: compact_time_out_of_range: the compact time of 1065151889408
+-- would start with the deterministic marker"
+SELECT set_config('uxid.mono_757372_3', '1700000000000:100', FALSE);
+    set_config     
+-------------------
+ 1700000000000:100
+(1 row)
+
+SELECT d.time_ms AS carried_time
+FROM
+    uxid_decode_at(
+        uxid_monotonic('usr', 's', TRUE, time_ms => 1065151889408),
+        1700000000000
+    ) AS d;
+ carried_time  
+---------------
+ 1700000000000
+(1 row)
+
+SELECT
+    split_part(pg_temp.state('uxid.mono_757372_3'), ':', 1) AS state_time,
+    split_part(pg_temp.state('uxid.mono_757372_3'), ':', 2)::numeric
+    BETWEEN 101 AND 4196 AS stepped_value;
+  state_time   | stepped_value 
+---------------+---------------
+ 1700000000000 | t
+(1 row)
+
 SELECT uxid_monotonic('fresh', 'xs', FALSE, 1, time_ms => 1700000000000);
 ERROR:  uxid: invalid_argument: a monotonic xs uses compact time, so its random field has a byte to step; compact must be NULL or true
 SELECT pg_temp.state('uxid.mono_6672657368_1') IS NULL AS no_state_written;
