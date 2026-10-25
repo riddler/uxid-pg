@@ -43,14 +43,10 @@ step "sqlfluff lint (postgres dialect, .sqlfluff)"
 mise run lint
 
 step "conformance corpus check"
-# The corpus is vendored by a later change, with scripts/corpus-check.sh
-# beside it. Once either exists the check runs, and a missing script is
-# then a failure, not a skip.
-if [ -d conformance ] || [ -e scripts/corpus-check.sh ]; then
-  bash scripts/corpus-check.sh
-else
-  echo "no conformance/ in this tree: the corpus is not vendored yet"
-fi
+# The vendored corpus (conformance/) against its manifest and
+# conformance/SOURCE.json: the hash over the case files and each case
+# count. The script is POSIX sh and runs under sh, not bash.
+sh scripts/corpus-check.sh
 
 printf '\\ngate: green\\n'
 """

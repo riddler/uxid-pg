@@ -111,7 +111,7 @@ repository and none is created: no agent or session lists, reads, prints or
 sets one, and nobody runs `gh secret` against this repository. PGXN is not
 part of this repository: nothing is uploaded there. Merging the prep follows
 this file's merge row, and nothing else this file reserves for the operator
-changes. A prep is cut only on a green full gate, which will include the
+changes. A prep is cut only on a green full gate, which includes the
 conformance corpus check.
 
 This repository keeps no decision records (`docs/adr`). A release or gating
@@ -120,10 +120,10 @@ paragraphs, and in the header of the workflow it governs; a change a user of
 the extension could notice is a changelog fragment (Conventions, below). The
 ID format itself is not decided here: it is uxid-ex's wire-format spec,
 `guides/wire-format.md` in https://github.com/riddler/uxid-ex, read at the
-tag the vendored corpus names (`conformance/SOURCE.json`, once the corpus is
-vendored). That this repository keeps no decision records was decided by the
-conductor under a standing consent, 2026-10-24; a future API decision may
-start a `docs/adr` directory.
+tag the vendored corpus names (`conformance/SOURCE.json`). That this
+repository keeps no decision records was decided by the conductor under a
+standing consent, 2026-10-24; a future API decision may start a `docs/adr`
+directory.
 
 Widening this section is a decision for the operator to make and record here.
 An agent may draft the change; it does not adopt it.
@@ -165,20 +165,22 @@ the request check `uxid_check_request`), deterministic generation
 `uxid_decode_at` and `uxid_decode_error`), the validity checks
 (`uxid_is_valid` and `uxid_is_deterministic`), the `uxid` domain and their
 internal `uxid__` helpers, the PGXS `Makefile`, a `pg_regress` test per
-function under `test/` beside the surface test,
+function under `test/` beside the surface test and the corpus runner
+(`test/sql/conformance.sql`), the conformance corpus vendored under
+`conformance/` with its check (`scripts/corpus-check.sh`),
 `mise.toml` with the gate tasks, the gate's Docker image and its scripts
 under `docker/`, the CI and release workflows under `.github/workflows/`,
 the sqlfluff configuration (`.sqlfluff`), `LICENSE`, `CHANGELOG.md` and
 `changelog.d/`, beside these agent instructions, the wurk manifest
 (`.claude/wurk.json`), the Claude Code settings (`.claude/settings.json`)
-and the tracker files under `.beads/`. The vendored corpus arrives with a
-later change; until it does, the sentences in this file about it describe
-the target, not the current tree.
+and the tracker files under `.beads/`.
 
 - **The extension is `uxid`.** Version 1.0.0 is its first release, a GitHub
   release on the tag `v1.0.0`.
-- **The corpus is the arbiter.** `conformance/` will hold the corpus
-  vendored from uxid-ex at a release tag, its tag, commit and hash recorded in
+- **The corpus is the arbiter.** `conformance/` holds the corpus
+  vendored from uxid-ex at a release tag (`v2.10.0`: its case files,
+  `manifest.json`, `schema/` and `README.md`, byte for byte; not the
+  generator source under its `source/`), its tag, commit and hash recorded in
   `conformance/SOURCE.json`. The vendored files are never edited, and every
   case passes with no skip list: a case this port cannot pass is reported
   against uxid-ex with its evidence, never skipped or worked round here. An
@@ -209,9 +211,14 @@ server's `SELECT version()`, copies the tree into the container, runs
 so the build and the `pg_regress` output never land in the working tree.
 The gate then runs mise.toml's `lint` task, `sqlfluff lint` (the postgres
 dialect, `.sqlfluff`) over the extension script and `test/sql/`, and the
-conformance corpus check (`scripts/corpus-check.sh`) once the corpus is
-vendored: until `conformance/` or that script exists the step says so and
-passes, and once either exists a missing script fails the gate. The inner
+conformance corpus check, `sh scripts/corpus-check.sh`: a POSIX sh script
+that checks `conformance/SOURCE.json` names the tag and commit it expects,
+recomputes the manifest's `corpus_hash` over the case files' bytes in the
+manifest's order and counts each file's lines against its `case_count`,
+and fails on a mismatch, which is never repaired by rewriting a hash or a
+count. The corpus cases themselves run under `make installcheck`: the
+regression test `conformance` loads each case file with psql's `\copy`
+and runs every case through a runner defined in that test. The inner
 loop, `mise run gate:loop`, is `docker/installcheck.sh` alone.
 
 The SQL lint is sqlfluff with the postgres dialect: sqlfluff 4.4.0 parses

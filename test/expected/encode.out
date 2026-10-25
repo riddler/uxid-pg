@@ -1,7 +1,7 @@
 -- uxid_encode, the pure encoder: a fixed time and fixed random bytes give
 -- the id the wire format defines.
 -- A hand-picked subset of the conformance corpus's encode cases, named by
--- case id (until the corpus runner runs them all): every size in both
+-- case id (conformance.sql runs them all): every size in both
 -- time forms and both cases, a random field of all ones at each short last
 -- group, the ends of standard time, the compact guard's last valid time,
 -- no prefix and the empty prefix, and a prefix holding the delimiter.
