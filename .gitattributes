@@ -1,0 +1,3 @@
+# pg_regress expected output is psql output byte for byte, which pads a
+# column header with a trailing space; whitespace checks skip these files.
+test/expected/*.out -whitespace

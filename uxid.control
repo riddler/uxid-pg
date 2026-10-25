@@ -1,0 +1,5 @@
+# uxid extension
+comment = 'Prefixed, K-sortable, human-readable identifiers (UXID)'
+default_version = '1.0.0'
+relocatable = true
+superuser = false
