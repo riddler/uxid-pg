@@ -89,8 +89,7 @@ a campaign consent names, or the operator names in their own words, the
 prep - the version bump (`default_version` in `uxid.control` and the value
 `uxid_version()` returns; for a version after 1.0.0, the upgrade script
 `uxid--<from>--<to>.sql` that carries the change, since a released script is
-never edited), the version in the README's install line once the README
-carries one, and the changelog promotion - lands through the rows above; once
+never edited), the version in the README's install commands, and the changelog promotion - lands through the rows above; once
 it is merged to `origin/main`, the conductor or the session that owns the
 release bead tags that merged commit with the new version (`vX.Y.Z`) and
 pushes the tag. The tag push is the release: the release workflow
@@ -164,9 +163,11 @@ the request check `uxid_check_request`), deterministic generation
 `uxid_monotonic_step`), decoding (`uxid_decode`, the pure decoder
 `uxid_decode_at` and `uxid_decode_error`), the validity checks
 (`uxid_is_valid` and `uxid_is_deterministic`), the `uxid` domain and their
-internal `uxid__` helpers, the PGXS `Makefile`, a `pg_regress` test per
-function under `test/` beside the surface test and the corpus runner
-(`test/sql/conformance.sql`), the conformance corpus vendored under
+internal `uxid__` helpers, the PGXS `Makefile`, the `pg_regress` tests
+under `test/` (one or more files for each public function, one for the
+internal helpers' base32 and random-byte steps, one for the schema binding,
+the surface test and the corpus runner `test/sql/conformance.sql`), the
+conformance corpus vendored under
 `conformance/` with its check (`scripts/corpus-check.sh`),
 `mise.toml` with the gate tasks, the gate's Docker image and its scripts
 under `docker/`, the CI and release workflows under `.github/workflows/`,
@@ -186,8 +187,8 @@ and the tracker files under `.beads/`.
   against uxid-ex with its evidence, never skipped or worked round here. An
   answer the corpus does not fix follows uxid-ex's spec at that tag.
 
-`README.md`, which a later change adds, is the user reference; `CHANGELOG.md`
-records each release.
+`README.md` is the user reference, `docs/wire-format.md` points at the
+reference spec the corpus names, and `CHANGELOG.md` records each release.
 
 ## Build & Test
 
@@ -232,8 +233,8 @@ the extension script, which is larger, is linted whole.
 
 There is no line-coverage floor: no token-free tool measures SQL and PL/pgSQL
 function bodies. In its place stand a surface test (the extension's functions
-read from the catalog and pinned), a regression file per function and the
-full corpus.
+read from the catalog and pinned), regression files that exercise every
+public function and the full corpus.
 
 The gate proves the server version it runs on (18). The declared floor is
 PostgreSQL 14, stated apart from the gate's version. CI
