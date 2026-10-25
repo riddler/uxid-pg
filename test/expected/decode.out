@@ -120,7 +120,7 @@ SELECT
     OR (d.time_ms IS DISTINCT FROM c.expected_time_ms) AS differs
 FROM decode_case AS c
 CROSS JOIN LATERAL uxid_decode_at(c.case_input, 1699913600000) AS d
-ORDER BY c.case_id;
+ORDER BY convert_to(c.case_id, 'UTF8');
                  case_id                 | prefix | size | compact | deterministic |    time_ms     | differs 
 -----------------------------------------+--------+------+---------+---------------+----------------+---------
  decode/deterministic-cus-s              | cus    | s    | f       | t             |                | f
@@ -157,7 +157,7 @@ SELECT
     OR (d.time_ms IS DISTINCT FROM c.expected_time_ms) AS differs
 FROM decode_case AS c
 CROSS JOIN LATERAL uxid_decode_at(c.case_input, 2164577117182) AS d
-ORDER BY c.case_id;
+ORDER BY convert_to(c.case_id, 'UTF8');
                  case_id                 | differs 
 -----------------------------------------+---------
  decode/deterministic-cus-s              | f

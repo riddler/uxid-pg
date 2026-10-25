@@ -47,7 +47,7 @@ FROM
         ('invalid', 'usr_01hf7yat00u')
     ) AS c (kind, input)
 GROUP BY c.kind
-ORDER BY c.kind;
+ORDER BY convert_to(c.kind, 'UTF8');
 
 -- sabotage: ascii(...) IN (122) in place of IN (90, 122) in
 -- uxid_is_deterministic -> " usr_ZCVT7EPAC0T1EBCSJFYF7CWZ25 | t        | f"
@@ -63,7 +63,7 @@ FROM
         ('zqz4cwzgyw8ks97869'),
         ('usr_ZCVT7EPAC0T1EBCSJFYF7CWZ25')
     ) AS c (input)
-ORDER BY c.input;
+ORDER BY convert_to(c.input, 'UTF8');
 
 -- Stricter than the reference: a body in the alphabet of a length the
 -- table does not hold (11, 25, 27, 30 characters) is not valid, and a
@@ -85,7 +85,7 @@ FROM
         ('usr_zcvt7epac0t1ebcsjfyf7cwzi5'),
         ('usr_z')
     ) AS c (input)
-ORDER BY c.input;
+ORDER BY convert_to(c.input, 'UTF8');
 
 -- required_prefix: the decoded prefix must equal it; NULL or the empty
 -- string asks for none. The prefix is everything before the last
@@ -112,7 +112,9 @@ FROM
         ('a_b_01hf7yat000001', 'a'),
         ('usr_0lhf7yat0004h1', 'usr')
     ) AS c (input, required_prefix)
-ORDER BY c.input, c.required_prefix NULLS FIRST;
+ORDER BY
+    convert_to(c.input, 'UTF8'),
+    convert_to(c.required_prefix, 'UTF8') NULLS FIRST;
 
 -- The delimiter: an id is read with the delimiter given, a NULL one is the
 -- default _, and an empty one makes every id invalid and not

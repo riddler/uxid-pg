@@ -122,7 +122,7 @@ SELECT
     OR (d.time_ms IS DISTINCT FROM c.expected_time_ms) AS differs
 FROM decode_case AS c
 CROSS JOIN LATERAL uxid_decode_at(c.case_input, 1699913600000) AS d
-ORDER BY c.case_id;
+ORDER BY convert_to(c.case_id, 'UTF8');
 
 -- At the window's last clock, 2164577117182 ms.
 -- sabotage: - 1099511627775 in place of - 1099511627776 in
@@ -138,7 +138,7 @@ SELECT
     OR (d.time_ms IS DISTINCT FROM c.expected_time_ms) AS differs
 FROM decode_case AS c
 CROSS JOIN LATERAL uxid_decode_at(c.case_input, 2164577117182) AS d
-ORDER BY c.case_id;
+ORDER BY convert_to(c.case_id, 'UTF8');
 
 -- Just outside the window the corpus's compact cases no longer hold:
 -- one millisecond before its start, the cases at 1700000000000 are more

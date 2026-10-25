@@ -46,7 +46,7 @@ FROM
         ('invalid', 'usr_01hf7yat00u')
     ) AS c (kind, input)
 GROUP BY c.kind
-ORDER BY c.kind;
+ORDER BY convert_to(c.kind, 'UTF8');
   kind   | all_valid | any_valid | any_deterministic 
 ---------+-----------+-----------+-------------------
  invalid | f         | f         | f
@@ -67,12 +67,12 @@ FROM
         ('zqz4cwzgyw8ks97869'),
         ('usr_ZCVT7EPAC0T1EBCSJFYF7CWZ25')
     ) AS c (input)
-ORDER BY c.input;
+ORDER BY convert_to(c.input, 'UTF8');
              input              | id_valid | id_deterministic 
 --------------------------------+----------+------------------
  cus_zt9vnyfd85bff0             | t        | t
- usr_zcvt7epac0t1ebcsjfyf7cwz25 | t        | t
  usr_ZCVT7EPAC0T1EBCSJFYF7CWZ25 | t        | t
+ usr_zcvt7epac0t1ebcsjfyf7cwz25 | t        | t
  zqz4cwzgyw8ks97869             | t        | t
 (4 rows)
 
@@ -96,7 +96,7 @@ FROM
         ('usr_zcvt7epac0t1ebcsjfyf7cwzi5'),
         ('usr_z')
     ) AS c (input)
-ORDER BY c.input;
+ORDER BY convert_to(c.input, 'UTF8');
                input                | id_valid | id_deterministic 
 ------------------------------------+----------+------------------
  usr_01hf7yat000                    | f        | f
@@ -133,20 +133,22 @@ FROM
         ('a_b_01hf7yat000001', 'a'),
         ('usr_0lhf7yat0004h1', 'usr')
     ) AS c (input, required_prefix)
-ORDER BY c.input, c.required_prefix NULLS FIRST;
+ORDER BY
+    convert_to(c.input, 'UTF8'),
+    convert_to(c.required_prefix, 'UTF8') NULLS FIRST;
        input        | required_prefix | id_valid 
 --------------------+-----------------+----------
- _01hf7yat0004h1    | usr             | f
  01hf7yat0004h1     |                 | t
  01hf7yat0004h1     | usr             | f
+ _01hf7yat0004h1    | usr             | f
  a_b_01hf7yat000001 | a               | f
  a_b_01hf7yat000001 | a_b             | t
  usr_01hf7yat0004h1 |                 | t
  usr_01hf7yat0004h1 |                 | t
+ usr_01hf7yat0004h1 | USR             | f
  usr_01hf7yat0004h1 | doc             | f
  usr_01hf7yat0004h1 | us              | f
  usr_01hf7yat0004h1 | usr             | t
- usr_01hf7yat0004h1 | USR             | f
  usr_0lhf7yat0004h1 | usr             | f
 (12 rows)
 

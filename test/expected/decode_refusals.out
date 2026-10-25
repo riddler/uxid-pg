@@ -120,7 +120,7 @@ FROM
             'usr_01hf7yat00u', 'invalid_length'
         )
     ) AS c (case_id, input, expected)
-ORDER BY c.case_id;
+ORDER BY convert_to(c.case_id, 'UTF8');
                         case_id                         |      reason       | matches |        decode_refusal         | decode_at_matches 
 --------------------------------------------------------+-------------------+---------+-------------------------------+-------------------
  invalid/decode-character-in-deterministic              | invalid_character | t       | 22P02 uxid: invalid_character | t
@@ -162,7 +162,7 @@ FROM
         ('usr_z1yhw20vau'),
         ('usr_01hf7yat00')
     ) AS c (input)
-ORDER BY c.input;
+ORDER BY convert_to(c.input, 'UTF8');
       input      |      reason       
 -----------------+-------------------
  usr_            | empty
