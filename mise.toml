@@ -14,6 +14,15 @@ pipx.uvx = true
 description = "Inner loop: build the image, start the server and run make installcheck (never the advancement gate)"
 run = "bash docker/installcheck.sh"
 
+[tasks.lint]
+description = "sqlfluff lint (postgres dialect, .sqlfluff) over the extension scripts and test/sql"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+sqlfluff --version
+sqlfluff lint uxid--*.sql test/sql
+"""
+
 [tasks.gate]
 description = "The full gate"
 run = """
@@ -30,8 +39,8 @@ docker --version
 bash docker/installcheck.sh
 
 step "sqlfluff lint (postgres dialect, .sqlfluff)"
-sqlfluff --version
-sqlfluff lint uxid--*.sql test/sql
+# The lint task above; CI's lint job runs the same task.
+mise run lint
 
 step "conformance corpus check"
 # The corpus is vendored by a later change, with scripts/corpus-check.sh
