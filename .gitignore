@@ -16,3 +16,17 @@
 # Local beads telemetry churn; the tracker syncs through its own Dolt remote
 # (`sync.remote` in `.beads/config.yaml`), not through this git repository.
 .beads/interactions.jsonl
+
+# pg_regress output: `make installcheck` run outside the gate's container
+# writes these beside the Makefile (the gate runs it inside the container).
+results/
+regression.diffs
+regression.out
+
+# Expected test output is tracked. A common global gitignore rule for
+# `*.out` (program output) would otherwise hide it.
+!test/expected/*.out
+
+# Release tarballs and their checksums.
+*.tar.gz
+*.sha256

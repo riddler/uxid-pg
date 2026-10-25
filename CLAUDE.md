@@ -154,15 +154,18 @@ CSPRNG. It installs by `CREATE EXTENSION uxid` (relocatable, with
 it), by running the extension script once as a plain migration, or through
 pg_tle's `pgtle.install_extension` on managed services.
 
-The tree on `main` today holds only these agent instructions, the wurk
-manifest (`.claude/wurk.json`), the Claude Code settings
-(`.claude/settings.json`), the tracker files under `.beads/` and a
-`.gitignore`. The control file, the extension script, the `Makefile`,
-`mise.toml` and its gate tasks, the gate's Docker image, the regression
-tests, CI, the release workflow and the vendored corpus arrive with later
-changes; until they do, the sentences in this file about the 1.0.0
-extension, its corpus, its gate and its workflows describe the target, not
-the current tree.
+The tree on `main` today holds the build and the gate around an almost
+empty extension: the control file (`uxid.control`), the 1.0.0 extension
+script (`uxid--1.0.0.sql`), which defines only `uxid_version()`, the PGXS
+`Makefile`, one `pg_regress` test under `test/`, `mise.toml` with the gate
+tasks, the gate's Docker image under `docker/`, the sqlfluff configuration
+(`.sqlfluff`), `LICENSE`, `CHANGELOG.md` and `changelog.d/`, beside these
+agent instructions, the wurk manifest (`.claude/wurk.json`), the Claude
+Code settings (`.claude/settings.json`) and the tracker files under
+`.beads/`. The identifier functions, the `uxid` domain, CI, the release
+workflow and the vendored corpus arrive with later changes; until they do,
+the sentences in this file about those describe the target, not the
+current tree.
 
 - **The extension is `uxid`.** Version 1.0.0 is its first release, a GitHub
   release on the tag `v1.0.0`.
@@ -173,13 +176,12 @@ the current tree.
   against uxid-ex with its evidence, never skipped or worked round here. An
   answer the corpus does not fix follows uxid-ex's spec at that tag.
 
-`README.md`, which a later change adds, is the user reference; `CHANGELOG.md`,
-which the scaffold adds, records each release.
+`README.md`, which a later change adds, is the user reference; `CHANGELOG.md`
+records each release.
 
 ## Build & Test
 
-The gate tasks live in `mise.toml`, which the scaffold adds; on a tree without
-it these commands do not run yet.
+The gate tasks live in `mise.toml`.
 
 ```bash
 mise install            # Python and sqlfluff, as mise.toml pins them
@@ -189,15 +191,27 @@ mise run gate           # full gate
 
 The local gate runs PostgreSQL in Docker: no PostgreSQL client or server is
 installed or linked on the host for it, `psql` and `pg_config` are not
-expected on the host's `PATH`, and sqlfluff comes from mise. Once the change
-that adds the gate tasks lands, the full gate will build `docker/Dockerfile`
-(FROM `postgres:18` pinned by digest, adding `make`), start a container with
-the repository mounted, print `docker --version` and the server's
-`SELECT version()`, run `make install` and `make installcheck` (`pg_regress`)
-inside it, print `regression.diffs` on a failure, and remove the container;
-then run `sqlfluff lint` (the postgres dialect, pinned through mise), and the
-conformance corpus check once the corpus is vendored. The inner loop is the
-container's `make installcheck` only.
+expected on the host's `PATH`, and sqlfluff comes from mise. The full gate
+prints `docker --version`, then `docker/installcheck.sh` builds
+`docker/Dockerfile` (FROM `postgres:18` pinned by digest, adding `make`),
+starts a container with the repository mounted read-only, prints the
+server's `SELECT version()`, copies the tree into the container, runs
+`make install` and `make installcheck` (`pg_regress`) there, prints
+`regression.diffs` on a failure, and removes the container on every exit,
+so the build and the `pg_regress` output never land in the working tree.
+The gate then runs `sqlfluff lint` (the postgres dialect, `.sqlfluff`) over
+the extension script and `test/sql/`, and the conformance corpus check
+(`scripts/corpus-check.sh`) once the corpus is vendored: until
+`conformance/` or that script exists the step says so and passes, and once
+either exists a missing script fails the gate. The inner loop,
+`mise run gate:loop`, is `docker/installcheck.sh` alone.
+
+The SQL lint is sqlfluff with the postgres dialect: sqlfluff 4.4.0 parses
+SQL-standard function bodies (`BEGIN ATOMIC ... END` and `RETURN`), the
+form the extension's functions are bound in, so the `pg_format` check mode, the fallback for a construct sqlfluff cannot
+parse, is not used. No sqlfluff rule is disabled and no file is excluded
+from the lint (decided by the conductor under a standing consent,
+2026-10-24).
 
 There is no line-coverage floor: no token-free tool measures SQL and PL/pgSQL
 function bodies. In its place stand a surface test (the extension's functions
