@@ -1,0 +1,659 @@
+-- The conformance corpus (conformance/, vendored from uxid-ex at the tag
+-- conformance/SOURCE.json names), every case of every file, run by a
+-- runner defined here and never in the extension script. The corpus
+-- README ("Running the cases") is the procedure; the wire format guide
+-- at the same tag is the authority where a case is silent.
+--
+-- Each file is loaded with psql's \copy into the staging table as CSV
+-- with a quote byte (0x01) and a delimiter byte (0x02) no case line
+-- contains, so each line arrives whole, byte for byte, as one text value
+-- (COPY's older option spelling keeps each \copy line within the lint's
+-- width). The lines carry non-ASCII bytes (UTF-8), so the client encoding
+-- is UTF-8 for the load. make installcheck runs pg_regress, and so psql,
+-- at the top of the tree, so \cd conformance finds the files there.
+SET client_encoding = 'UTF8';
+\set SHOW_CONTEXT never
+
+CREATE TEMP TABLE stage (
+    line_no bigint GENERATED ALWAYS AS IDENTITY,
+    case_file text,
+    src text NOT NULL
+);
+
+\cd conformance
+\copy stage (src) FROM 'manifest.json' CSV QUOTE E'\x01' DELIMITER E'\x02'
+UPDATE stage SET case_file = 'manifest.json'
+WHERE case_file IS NULL;
+\copy stage (src) FROM 'encode.json' CSV QUOTE E'\x01' DELIMITER E'\x02'
+UPDATE stage SET case_file = 'encode.json'
+WHERE case_file IS NULL;
+\copy stage (src) FROM 'deterministic.json' CSV QUOTE E'\x01' DELIMITER E'\x02'
+UPDATE stage SET case_file = 'deterministic.json'
+WHERE case_file IS NULL;
+\copy stage (src) FROM 'decode.json' CSV QUOTE E'\x01' DELIMITER E'\x02'
+UPDATE stage SET case_file = 'decode.json'
+WHERE case_file IS NULL;
+\copy stage (src) FROM 'invalid.json' CSV QUOTE E'\x01' DELIMITER E'\x02'
+UPDATE stage SET case_file = 'invalid.json'
+WHERE case_file IS NULL;
+\copy stage (src) FROM 'monotonic.json' CSV QUOTE E'\x01' DELIMITER E'\x02'
+UPDATE stage SET case_file = 'monotonic.json'
+WHERE case_file IS NULL;
+\cd ..
+
+-- The manifest's case files, in its order, with their kind and count.
+CREATE TEMP VIEW corpus_file AS
+SELECT
+    f.ord,
+    f.entry ->> 'file' AS case_file,
+    f.entry ->> 'kind' AS kind,
+    (f.entry ->> 'case_count')::integer AS case_count
+FROM stage AS m
+CROSS JOIN
+    LATERAL jsonb_array_elements(m.src::jsonb -> 'files')
+    WITH ORDINALITY AS f (entry, ord)
+WHERE m.case_file = 'manifest.json';
+
+-- The manifest is one line, corpus version 1, and the loaded lines are
+-- the files' bytes: one newline back on each, concatenated in the
+-- manifest's order, they hash to its corpus_hash (the corpus README,
+-- step 1; scripts/corpus-check.sh checks the files on disk the same way).
+-- sabotage: QUOTE E'\x22' (the double quote) in place of E'\x01' on the
+-- encode.json load -> " f            |              1 | 1"
+WITH
+loaded AS (
+    SELECT
+        'sha256:'
+        || encode(
+            sha256(
+                string_agg(
+                    convert_to(l.src, 'UTF8') || '\x0a'::bytea,
+                    ''::bytea
+                    ORDER BY f.ord, l.line_no
+                )
+            ),
+            'hex'
+        ) AS corpus_hash
+    FROM stage AS l
+    INNER JOIN corpus_file AS f ON l.case_file = f.case_file
+)
+
+SELECT
+    loaded.corpus_hash = min(m.src::jsonb ->> 'corpus_hash')
+        AS hash_matches,
+    count(*) AS manifest_lines,
+    min(m.src::jsonb ->> 'corpus_version') AS corpus_version
+FROM stage AS m
+CROSS JOIN loaded
+WHERE m.case_file = 'manifest.json'
+GROUP BY loaded.corpus_hash;
+
+-- Each file's line count against its case_count (the corpus README,
+-- step 2), in the manifest's order.
+SELECT
+    f.ord,
+    f.case_file,
+    f.kind,
+    f.case_count,
+    count(l.line_no) AS lines_loaded
+FROM corpus_file AS f
+LEFT JOIN stage AS l ON f.case_file = l.case_file
+GROUP BY f.ord, f.case_file, f.kind, f.case_count
+ORDER BY f.ord;
+
+-- The keys of obj outside known, then those of required it lacks, as a
+-- reason; NULL when obj carries exactly what it may.
+CREATE FUNCTION pg_temp.corpus_keys(
+    p_what text, p_obj jsonb, p_known text[], p_required text[]
+)
+RETURNS text
+LANGUAGE plpgsql
+AS $keys$
+DECLARE
+    v_unknown text;
+    v_missing text;
+BEGIN
+    IF jsonb_typeof(p_obj) IS DISTINCT FROM 'object' THEN
+        RETURN p_what || ' is not an object';
+    END IF;
+    SELECT string_agg(k, ', ' ORDER BY k) INTO v_unknown
+    FROM jsonb_object_keys(p_obj) AS k
+    WHERE k <> ALL (p_known);
+    IF v_unknown IS NOT NULL THEN
+        RETURN p_what || ' carries a key the runner does not know: '
+            || v_unknown;
+    END IF;
+    SELECT string_agg(k, ', ' ORDER BY k) INTO v_missing
+    FROM unnest(p_required) AS k
+    WHERE NOT p_obj ? k;
+    IF v_missing IS NOT NULL THEN
+        RETURN p_what || ' lacks ' || v_missing;
+    END IF;
+    RETURN NULL;
+END;
+$keys$;
+
+-- A case line's id, or NULL when the line is not a JSON object with
+-- one, so a line that cannot be read still gets its row.
+CREATE FUNCTION pg_temp.corpus_id(p_line text)
+RETURNS text
+LANGUAGE plpgsql
+AS $id$
+BEGIN
+    RETURN p_line::jsonb ->> 'id';
+EXCEPTION WHEN OTHERS THEN
+    RETURN NULL;
+END;
+$id$;
+
+-- The reason a refusal is not the one a case names: the call raised
+-- nothing, or raised another SQLSTATE, or a message other than p_message
+-- (when p_exact) or one that does not start with it (a generation
+-- refusal, whose message goes on with a detail).
+CREATE FUNCTION pg_temp.corpus_refusal(
+    p_sql text, p_state text, p_message text, p_exact boolean
+)
+RETURNS text
+LANGUAGE plpgsql
+AS $refusal$
+BEGIN
+    EXECUTE p_sql;
+    RETURN 'not refused; expected SQLSTATE ' || p_state || ' with '
+        || p_message;
+EXCEPTION WHEN OTHERS THEN
+    IF
+        SQLSTATE = p_state
+        AND (
+            SQLERRM = p_message
+            OR (NOT p_exact AND starts_with(SQLERRM, p_message))
+        )
+    THEN
+        RETURN NULL;
+    END IF;
+    RETURN 'refused with SQLSTATE ' || SQLSTATE || ' "' || SQLERRM
+        || '"; expected ' || p_state || ' with ' || p_message;
+END;
+$refusal$;
+
+-- One case: NULL when it passes, otherwise the reason. The kind is the
+-- manifest's for the case's file. A case carrying a key the runner does
+-- not know, at the top or in its input or expected answer, fails rather
+-- than being half read. A null prefix is no prefix (the extension's own
+-- reading of a NULL prefix). Decoding takes an injected clock: every
+-- decode case runs at the first and the last millisecond of the window
+-- the corpus README gives for its compact cases, 1699913600000 ms
+-- inclusive to 2164577117183 ms exclusive, and at 1700000000000 ms, the
+-- time the cases are built at.
+CREATE FUNCTION pg_temp.corpus_case(p_kind text, p_line text)
+RETURNS text
+LANGUAGE plpgsql
+AS $case$
+DECLARE
+    v_case jsonb;
+    v_in jsonb;
+    v_want jsonb;
+    v_reason text;
+    v_got text;
+    v_clock bigint;
+    v_row record;
+    v_width integer;
+    v_time bigint;
+    v_rand numeric;
+    v_overflow numeric;
+    v_overflowed boolean := FALSE;
+    v_ids text[] := ARRAY[]::text[];
+    v_next record;
+    v_steps jsonb;
+    v_times jsonb;
+BEGIN
+    BEGIN
+        v_case := p_line::jsonb;
+    EXCEPTION WHEN OTHERS THEN
+        RETURN 'the line is not JSON: ' || SQLERRM;
+    END;
+    v_reason := pg_temp.corpus_keys(
+        'the case',
+        v_case,
+        CASE
+            WHEN p_kind = 'invalid' THEN ARRAY['expected_error', 'id', 'input']
+            ELSE ARRAY['expected', 'id', 'input']
+        END,
+        CASE
+            WHEN p_kind = 'invalid' THEN ARRAY['expected_error', 'id', 'input']
+            ELSE ARRAY['expected', 'id', 'input']
+        END
+    );
+    IF v_reason IS NOT NULL THEN
+        RETURN v_reason;
+    END IF;
+    IF NOT starts_with(coalesce(v_case ->> 'id', ''), p_kind || '/') THEN
+        RETURN 'the case id does not start with ' || p_kind || '/';
+    END IF;
+    v_in := v_case -> 'input';
+    v_want := v_case -> 'expected';
+
+    IF p_kind = 'encode' THEN
+        v_reason := pg_temp.corpus_keys(
+            'the input', v_in,
+            ARRAY['case', 'compact', 'prefix', 'rand', 'size', 'time'],
+            ARRAY['case', 'compact', 'prefix', 'rand', 'size', 'time']
+        );
+        IF v_reason IS NOT NULL THEN
+            RETURN v_reason;
+        END IF;
+        BEGIN
+            v_got := uxid_encode(
+                v_in ->> 'prefix',
+                v_in ->> 'size',
+                (v_in ->> 'time')::bigint,
+                decode(v_in ->> 'rand', 'hex'),
+                (v_in ->> 'compact')::boolean,
+                v_in ->> 'case'
+            );
+        EXCEPTION WHEN OTHERS THEN
+            RETURN 'raised SQLSTATE ' || SQLSTATE || ' "' || SQLERRM || '"';
+        END;
+        IF v_got IS DISTINCT FROM v_case ->> 'expected' THEN
+            RETURN 'got ' || coalesce(v_got, 'NULL') || ', expected '
+                || (v_case ->> 'expected');
+        END IF;
+        RETURN NULL;
+
+    ELSIF p_kind = 'deterministic' THEN
+        v_reason := pg_temp.corpus_keys(
+            'the input', v_in,
+            ARRAY['case', 'from', 'prefix', 'size'],
+            ARRAY['case', 'from', 'prefix', 'size']
+        );
+        IF v_reason IS NOT NULL THEN
+            RETURN v_reason;
+        END IF;
+        BEGIN
+            v_got := uxid_from(
+                v_in ->> 'prefix',
+                v_in ->> 'from',
+                v_in ->> 'size',
+                v_in ->> 'case'
+            );
+        EXCEPTION WHEN OTHERS THEN
+            RETURN 'raised SQLSTATE ' || SQLSTATE || ' "' || SQLERRM || '"';
+        END;
+        IF v_got IS DISTINCT FROM v_case ->> 'expected' THEN
+            RETURN 'got ' || coalesce(v_got, 'NULL') || ', expected '
+                || (v_case ->> 'expected');
+        END IF;
+        RETURN NULL;
+
+    ELSIF p_kind = 'decode' THEN
+        IF jsonb_typeof(v_in) IS DISTINCT FROM 'string' THEN
+            RETURN 'the input is not a string';
+        END IF;
+        v_reason := pg_temp.corpus_keys(
+            'the expected answer', v_want,
+            ARRAY['compact', 'deterministic', 'prefix', 'size', 'time'],
+            ARRAY['compact', 'deterministic', 'prefix', 'size', 'time']
+        );
+        IF v_reason IS NOT NULL THEN
+            RETURN v_reason;
+        END IF;
+        v_got := uxid_decode_error(v_in #>> '{}');
+        IF v_got IS NOT NULL THEN
+            RETURN 'uxid_decode_error gives ' || v_got || ', expected NULL';
+        END IF;
+        FOREACH v_clock IN ARRAY ARRAY[
+            1699913600000, 1700000000000, 2164577117182
+        ]::bigint[] LOOP
+            BEGIN
+                SELECT d.* INTO v_row
+                FROM uxid_decode_at(v_in #>> '{}', v_clock) AS d;
+            EXCEPTION WHEN OTHERS THEN
+                RETURN 'at clock ' || v_clock || ' raised SQLSTATE '
+                    || SQLSTATE || ' "' || SQLERRM || '"';
+            END;
+            IF
+                v_row.prefix IS DISTINCT FROM v_want ->> 'prefix'
+                OR v_row.size IS DISTINCT FROM v_want ->> 'size'
+                OR v_row.compact IS DISTINCT FROM (v_want ->> 'compact')::boolean
+                OR v_row.deterministic
+                IS DISTINCT FROM (v_want ->> 'deterministic')::boolean
+                OR v_row.time_ms IS DISTINCT FROM (v_want ->> 'time')::bigint
+            THEN
+                RETURN 'at clock ' || v_clock || ' got '
+                    || jsonb_build_object(
+                        'compact', v_row.compact,
+                        'deterministic', v_row.deterministic,
+                        'prefix', v_row.prefix,
+                        'size', v_row.size,
+                        'time', v_row.time_ms
+                    )::text
+                    || ', expected ' || v_want::text;
+            END IF;
+        END LOOP;
+        RETURN NULL;
+
+    ELSIF p_kind = 'invalid' THEN
+        IF v_in ? 'decode' THEN
+            v_reason := pg_temp.corpus_keys(
+                'the input', v_in, ARRAY['decode'], ARRAY['decode']
+            );
+            IF v_reason IS NOT NULL THEN
+                RETURN v_reason;
+            END IF;
+            IF jsonb_typeof(v_in -> 'decode') IS DISTINCT FROM 'string' THEN
+                RETURN 'the decode input is not a string';
+            END IF;
+            v_reason := pg_temp.corpus_refusal(
+                format(
+                    'SELECT * FROM uxid_decode_at(%L, 1700000000000)',
+                    v_in ->> 'decode'
+                ),
+                '22P02',
+                'uxid: ' || (v_case ->> 'expected_error'),
+                TRUE
+            );
+            IF v_reason IS NOT NULL THEN
+                RETURN 'uxid_decode_at ' || v_reason;
+            END IF;
+            v_got := uxid_decode_error(v_in ->> 'decode');
+            IF v_got IS DISTINCT FROM v_case ->> 'expected_error' THEN
+                RETURN 'uxid_decode_error gives ' || coalesce(v_got, 'NULL')
+                    || ', expected ' || (v_case ->> 'expected_error');
+            END IF;
+            RETURN NULL;
+        END IF;
+        v_reason := pg_temp.corpus_keys(
+            'the input', v_in, ARRAY['generate'], ARRAY['generate']
+        );
+        IF v_reason IS NOT NULL THEN
+            RETURN v_reason;
+        END IF;
+        v_in := v_in -> 'generate';
+        v_reason := pg_temp.corpus_keys(
+            'the generate input', v_in,
+            ARRAY[
+                'case', 'compact', 'from', 'monotonic', 'prefix', 'rand',
+                'rand_size', 'size', 'time'
+            ],
+            ARRAY[]::text[]
+        );
+        IF v_reason IS NOT NULL THEN
+            RETURN v_reason;
+        END IF;
+        -- An absent option is NULL, which uxid_check_request reads as its
+        -- default.
+        v_reason := pg_temp.corpus_refusal(
+            format(
+                'SELECT uxid_check_request(prefix => %L, size => %L, '
+                'compact => %L::boolean, rand_size => %L::integer, '
+                'letter_case => %L, time_ms => %L::bigint, '
+                'rand => decode(%L, ''hex''), from_key => %L, '
+                'monotonic => %L::boolean)',
+                v_in ->> 'prefix',
+                v_in ->> 'size',
+                v_in ->> 'compact',
+                v_in ->> 'rand_size',
+                v_in ->> 'case',
+                v_in ->> 'time',
+                v_in ->> 'rand',
+                v_in ->> 'from',
+                v_in ->> 'monotonic'
+            ),
+            '22023',
+            'uxid: ' || (v_case ->> 'expected_error') || ': ',
+            FALSE
+        );
+        IF v_reason IS NOT NULL THEN
+            RETURN 'uxid_check_request ' || v_reason;
+        END IF;
+        RETURN NULL;
+
+    ELSIF p_kind = 'monotonic' THEN
+        v_reason := pg_temp.corpus_keys(
+            'the input', v_in,
+            ARRAY[
+                'compact', 'initial_seed', 'overflow_seed', 'prefix', 'size',
+                'steps', 'times'
+            ],
+            ARRAY[
+                'compact', 'initial_seed', 'overflow_seed', 'prefix', 'size',
+                'steps', 'times'
+            ]
+        );
+        IF v_reason IS NOT NULL THEN
+            RETURN v_reason;
+        END IF;
+        v_times := v_in -> 'times';
+        v_steps := v_in -> 'steps';
+        IF
+            jsonb_typeof(v_times) IS DISTINCT FROM 'array'
+            OR jsonb_typeof(v_steps) IS DISTINCT FROM 'array'
+            OR jsonb_typeof(v_want) IS DISTINCT FROM 'array'
+        THEN
+            RETURN 'times, steps and the expected answer are not arrays';
+        END IF;
+        IF jsonb_array_length(v_steps) <> jsonb_array_length(v_times) - 1 THEN
+            RETURN 'the case carries ' || jsonb_array_length(v_steps)
+                || ' steps for ' || jsonb_array_length(v_times) || ' calls';
+        END IF;
+        -- One generator, lower case, for the case's prefix, size and time
+        -- form; its random source is the case's draws, handed to the pure
+        -- step as values: the first call takes initial_seed, each later
+        -- call the next of steps, and the call whose step overflows the
+        -- field takes overflow_seed, which is drawn at most once. Each id
+        -- is the step's time and value through the encoder.
+        v_width := uxid__rand_width(
+            v_in ->> 'size', (v_in ->> 'compact')::boolean, NULL, TRUE
+        );
+        v_overflow := (v_in ->> 'overflow_seed')::numeric;
+        BEGIN
+            FOR v_call IN 1 .. jsonb_array_length(v_times) LOOP
+                SELECT s.time_ms, s.rand, s.drew INTO v_next
+                FROM uxid_monotonic_step(
+                    v_time,
+                    v_rand,
+                    (v_times ->> (v_call - 1))::bigint,
+                    v_width,
+                    CASE
+                        WHEN v_call = 1
+                            THEN (v_in ->> 'initial_seed')::numeric
+                    END,
+                    CASE
+                        WHEN v_call > 1
+                            THEN (v_steps ->> (v_call - 2))::bigint
+                    END,
+                    v_overflow
+                ) AS s;
+                IF v_next.drew = 'step_overflow' THEN
+                    v_overflow := NULL;
+                    v_overflowed := TRUE;
+                END IF;
+                v_time := v_next.time_ms;
+                v_rand := v_next.rand;
+                v_ids := v_ids || uxid_encode(
+                    v_in ->> 'prefix',
+                    v_in ->> 'size',
+                    v_time,
+                    uxid__numeric_bytes(v_rand, v_width),
+                    (v_in ->> 'compact')::boolean,
+                    'lower'
+                );
+            END LOOP;
+        EXCEPTION WHEN OTHERS THEN
+            RETURN 'raised SQLSTATE ' || SQLSTATE || ' "' || SQLERRM || '"';
+        END;
+        IF v_overflowed IS DISTINCT FROM (v_in -> 'overflow_seed' <> 'null') THEN
+            RETURN 'overflow_seed drawn: ' || v_overflowed::text
+                || ', but the case carries ' || (v_in ->> 'overflow_seed');
+        END IF;
+        IF to_jsonb(v_ids) IS DISTINCT FROM v_want THEN
+            RETURN 'got ' || to_jsonb(v_ids)::text || ', expected '
+                || v_want::text;
+        END IF;
+        RETURN NULL;
+    END IF;
+    RETURN 'no runner for the kind ' || coalesce(p_kind, 'NULL');
+END;
+$case$;
+
+-- Every case, one row each, in the manifest's order and each file's line
+-- order: the case id, pass or fail, and the reason on a failing row.
+-- There is no skip list.
+-- sabotage: 'y' in place of 'z' as uxid_from's marker -> " 36 |
+-- deterministic/golden-usr-xl ... | fail   | got
+-- usr_ycvt7epac0t1ebcsjfyf7cwz25, expected usr_zcvt7epac0t1ebcsjfyf7cwz25"
+-- and the other deterministic rows
+-- sabotage: 1099511627775 in place of 1099511627776 as the window
+-- uxid__compact_time steps back -> " 61 |
+-- decode/s-compact-guard-last-valid ... | fail   | at clock
+-- 1699913600000 got ..."
+-- sabotage: ERRCODE invalid_parameter_value in place of
+-- invalid_text_representation in uxid__raise_decode -> " 66 |
+-- invalid/decode-empty-string ... | fail   | uxid_decode_at refused with
+-- SQLSTATE 22023 ..." and the other decode refusal rows
+-- sabotage: < in place of <= in uxid__monotonic_rule -> " 94 |
+-- monotonic/xs-compact-overflow-clock-back ... | fail   | got
+-- [...]"
+-- sabotage: 2164577117183 in place of 2164577117182 as the last decode
+-- clock in pg_temp.corpus_case -> " 61 |
+-- decode/s-compact-guard-last-valid ... | fail   | at clock
+-- 2164577117183 got ..."
+WITH
+ran AS (
+    SELECT
+        f.ord,
+        l.line_no,
+        pg_temp.corpus_id(l.src) AS case_id,
+        pg_temp.corpus_case(f.kind, l.src) AS reason
+    FROM stage AS l
+    INNER JOIN corpus_file AS f ON l.case_file = f.case_file
+),
+
+numbered AS (
+    SELECT
+        ran.case_id,
+        ran.reason,
+        row_number() OVER (ORDER BY ran.ord, ran.line_no) AS n,
+        CASE WHEN ran.reason IS NULL THEN 'pass' ELSE 'fail' END AS result
+    FROM ran
+)
+
+SELECT
+    numbered.n,
+    numbered.case_id,
+    numbered.result,
+    numbered.reason
+FROM numbered
+ORDER BY numbered.n;
+
+-- The tally: every case loaded, every case run, every case passed.
+WITH
+ran AS (
+    SELECT pg_temp.corpus_case(f.kind, l.src) AS reason
+    FROM stage AS l
+    INNER JOIN corpus_file AS f ON l.case_file = f.case_file
+),
+
+listed AS (
+    SELECT sum(case_count) AS manifest_cases FROM corpus_file
+)
+
+SELECT
+    listed.manifest_cases,
+    count(*) AS cases,
+    count(*) FILTER (WHERE ran.reason IS NULL) AS passed
+FROM ran
+CROSS JOIN listed
+GROUP BY listed.manifest_cases;
+
+-- The runner itself, on lines that are not the corpus's, one row each: a
+-- key it does not know (at the top, in an input, in an expected answer,
+-- in a generate request) fails the case by name; a case id of another
+-- kind, a line that is not JSON, a wrong answer and a refusal of another
+-- name fail with what was seen; a null prefix is no prefix.
+-- sabotage: AND FALSE added to the unknown-key query in
+-- pg_temp.corpus_keys -> " unknown key at the top             | the
+-- case carries a key the runner does not know: note" and the four rows
+-- after it
+WITH
+probe (ord, probe_name, kind, src) AS (
+    VALUES
+    (
+        1,
+        'unknown key at the top',
+        'encode',
+        '{"expected":"usr_01hf7yat00","id":"encode/x","input":{'
+        || '"case":"lower","compact":false,"prefix":"usr","rand":"",'
+        || '"size":"xs","time":1700000000000},"note":1}'
+    ),
+    (
+        2,
+        'unknown key in the input',
+        'encode',
+        '{"expected":"usr_01hf7yat00","id":"encode/x","input":{'
+        || '"case":"lower","compact":false,"delimiter":"-",'
+        || '"prefix":"usr","rand":"","size":"xs","time":1700000000000}}'
+    ),
+    (
+        3,
+        'unknown key in the expected answer',
+        'decode',
+        '{"expected":{"compact":false,"deterministic":false,'
+        || '"prefix":"usr","random":"","size":"xs",'
+        || '"time":1700000000000},"id":"decode/x",'
+        || '"input":"usr_01hf7yat00"}'
+    ),
+    (
+        4,
+        'unknown key in a generate request',
+        'invalid',
+        '{"expected_error":"rand_width_mismatch","id":"invalid/x",'
+        || '"input":{"generate":{"prefix":"usr","rand":"01","seed":1}}}'
+    ),
+    (
+        5,
+        'unknown key in a monotonic input',
+        'monotonic',
+        '{"expected":["usr_hf7yat0001"],"id":"monotonic/x","input":{'
+        || '"compact":true,"initial_seed":1,"overflow_seed":null,'
+        || '"prefix":"usr","rand":"01","size":"xs","steps":[],'
+        || '"times":[1700000000000]}}'
+    ),
+    (
+        6,
+        'case id of another kind',
+        'encode',
+        '{"expected":"usr_01hf7yat00","id":"decode/x","input":{'
+        || '"case":"lower","compact":false,"prefix":"usr","rand":"",'
+        || '"size":"xs","time":1700000000000}}'
+    ),
+    (7, 'not JSON', 'encode', 'usr_01hf7yat00'),
+    (
+        8,
+        'wrong answer',
+        'encode',
+        '{"expected":"usr_01hf7yat01","id":"encode/x","input":{'
+        || '"case":"lower","compact":false,"prefix":"usr","rand":"",'
+        || '"size":"xs","time":1700000000000}}'
+    ),
+    (
+        9,
+        'refusal of another name',
+        'invalid',
+        '{"expected_error":"invalid_length","id":"invalid/x",'
+        || '"input":{"decode":"usr_"}}'
+    ),
+    (
+        10,
+        'a null prefix is no prefix',
+        'encode',
+        '{"expected":"01hf7yat00","id":"encode/x","input":{'
+        || '"case":"lower","compact":false,"prefix":null,"rand":"",'
+        || '"size":"xs","time":1700000000000}}'
+    )
+)
+
+SELECT
+    probe.probe_name,
+    pg_temp.corpus_case(probe.kind, probe.src) AS reason
+FROM probe
+ORDER BY probe.ord;

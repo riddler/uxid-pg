@@ -4,7 +4,7 @@ SET client_encoding = 'UTF8';
 \set SHOW_CONTEXT never
 
 -- Every deterministic case of the conformance corpus at v2.10.0 (12
--- cases), named by case id (until the corpus runner runs them). The
+-- cases), named by case id (conformance.sql runs them all again). The
 -- non-ASCII case hashes the key's UTF-8 bytes, U+00E9 precomposed.
 -- sabotage: the set_byte count byte left out of the hash input
 -- -> " deterministic/golden-usr-xl | usr_zaemdwqphe2sw084gxbs7czw33 | f"
