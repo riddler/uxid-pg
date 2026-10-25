@@ -318,6 +318,9 @@ jobs:
           name: release-files
           path: ${{ runner.temp }}/release/
           if-no-files-found: error
+          # A re-run of every job replaces the artifact an earlier attempt
+          # of this run uploaded, rather than stopping on its name.
+          overwrite: true
 
   publish:
     name: Create the GitHub release

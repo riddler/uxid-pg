@@ -202,11 +202,11 @@ server's `SELECT version()`, copies the tree into the container, runs
 `regression.diffs` on a failure, and removes the container on every exit,
 so the build and the `pg_regress` output never land in the working tree.
 The gate then runs mise.toml's `lint` task, `sqlfluff lint` (the postgres
-dialect, `.sqlfluff`) over the extension script and `test/sql/`, and the conformance corpus check
-(`scripts/corpus-check.sh`) once the corpus is vendored: until
-`conformance/` or that script exists the step says so and passes, and once
-either exists a missing script fails the gate. The inner loop,
-`mise run gate:loop`, is `docker/installcheck.sh` alone.
+dialect, `.sqlfluff`) over the extension script and `test/sql/`, and the
+conformance corpus check (`scripts/corpus-check.sh`) once the corpus is
+vendored: until `conformance/` or that script exists the step says so and
+passes, and once either exists a missing script fails the gate. The inner
+loop, `mise run gate:loop`, is `docker/installcheck.sh` alone.
 
 The SQL lint is sqlfluff with the postgres dialect: sqlfluff 4.4.0 parses
 SQL-standard function bodies (`BEGIN ATOMIC ... END` and `RETURN`), the
