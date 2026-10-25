@@ -1,0 +1,228 @@
+name: CI
+
+# Five jobs.
+#
+# - `gate` runs the full gate - the command an agent must have green before
+#   committing - on ubuntu-24.04, whose Docker daemon runs the gate's
+#   PostgreSQL 18 server (docker/installcheck.sh).
+# - `installcheck` runs `make installcheck` on PostgreSQL 14, 15, 16, 17 and
+#   18, one entry per major, in the pgxn/pgxn-tools container: `pg-start`
+#   installs that major from apt.postgresql.org and starts a cluster on it,
+#   and `pg-build-test` runs `make all`, `make install` and
+#   `make installcheck`, printing `regression.diffs` on a failure.
+# - `lint` runs mise.toml's `lint` task, the sqlfluff lint the gate runs.
+# - `migration` runs the extension script once as a plain migration, with
+#   `psql -v ON_ERROR_STOP=1 -f`, on a fresh database on PostgreSQL 14 (the
+#   floor) and 18 (the newest major), in the pgxn/pgxn-tools container, and
+#   then checks that `uxid_version()` returns the version in uxid.control.
+# - `pg-tle` builds pg_tle at the release tag named below on PostgreSQL 17 in
+#   the pgxn/pgxn-tools container, adds it to `shared_preload_libraries`,
+#   restarts the cluster, runs `CREATE EXTENSION pg_tle`, installs the
+#   extension script through `pgtle.install_extension`, runs
+#   `CREATE EXTENSION uxid` and checks the version as `migration` does.
+#
+# The version every job checks is `default_version` in uxid.control, and the
+# script it installs is `uxid--<that version>.sql`.
+#
+# Every action is pinned to a full commit SHA, with its version in a
+# trailing comment, and the pgxn/pgxn-tools image (linux/amd64) by its
+# digest. The gate's postgres:18 base image is pinned by digest in
+# docker/Dockerfile.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only: nothing here writes to the repository, and no repository secret
+# is read.
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request supersedes the run in
+# progress.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Full gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # The tools come from mise.toml, provisioned by mise itself: Python,
+      # uv and sqlfluff. The action installs mise at the version below, runs
+      # `mise install` against mise.toml, and caches the tools.
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          version: 2026.8.2
+
+      # The gate is mise.toml's `gate` task. The command is read out of
+      # .claude/wurk.json (gate.full) rather than written here, so the gate CI
+      # runs and the gate an agent must have green are one definition. It is
+      # read and executed inside the step rather than interpolated into
+      # `run:`, so a repository file never reaches the shell as expression
+      # text.
+      - name: Full gate
+        run: |
+          set -euo pipefail
+          mapfile -t cmd < <(jq -er '.gate.full[]' .claude/wurk.json)
+          test "${#cmd[@]}" -gt 0 || { echo "::error::gate.full is empty" >&2; exit 1; }
+          echo "gate command (.claude/wurk.json gate.full): ${cmd[*]}"
+          "${cmd[@]}"
+
+      # A gate that rewrites a tracked file or leaves an untracked file that
+      # is not ignored passes locally only because the change is then
+      # committed; here it is a failure, as it is before a release.
+      - name: Check the gate left the checkout clean
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --short
+            echo "::error::the gate left changed or untracked files" >&2
+            exit 1
+          fi
+
+  installcheck:
+    name: make installcheck (PostgreSQL ${{ matrix.pg }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container: pgxn/pgxn-tools@sha256:53e79ef1c8b9a0ee88b51e89b36fd30c46c9f2326aec0cde1d7f66e47ad719ff
+
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17, 18]
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install and start PostgreSQL ${{ matrix.pg }}
+        run: pg-start ${{ matrix.pg }}
+
+      - name: make all, make install, make installcheck
+        run: pg-build-test
+
+  lint:
+    name: sqlfluff lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          version: 2026.8.2
+
+      - name: sqlfluff lint (mise.toml's lint task)
+        run: mise run lint
+
+  migration:
+    name: Plain migration (PostgreSQL ${{ matrix.pg }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    container: pgxn/pgxn-tools@sha256:53e79ef1c8b9a0ee88b51e89b36fd30c46c9f2326aec0cde1d7f66e47ad719ff
+
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 18]
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install and start PostgreSQL ${{ matrix.pg }}
+        run: pg-start ${{ matrix.pg }}
+
+      # The script runs once on a database nothing else has touched, and any
+      # error in it stops psql and the step.
+      - name: Run the extension script as a plain migration and check its version
+        run: |
+          set -euo pipefail
+          version="$(sed -n "s/^default_version = '\([^']*\)'$/\1/p" uxid.control)"
+          test -n "$version" || { echo "::error::no default_version in uxid.control" >&2; exit 1; }
+          createdb migration
+          psql -X -v ON_ERROR_STOP=1 -d migration -f "uxid--${version}.sql"
+          got="$(psql -X -v ON_ERROR_STOP=1 -d migration -tA -c 'SELECT uxid_version()')"
+          echo "uxid_version() returns ${got}"
+          if [ "$got" != "$version" ]; then
+            echo "::error::uxid_version() returns ${got}, but uxid.control says ${version}" >&2
+            exit 1
+          fi
+
+  pg-tle:
+    name: pg_tle install (PostgreSQL 17)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container: pgxn/pgxn-tools@sha256:53e79ef1c8b9a0ee88b51e89b36fd30c46c9f2326aec0cde1d7f66e47ad719ff
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # pg_tle at its release tag v1.5.3, checked out by the tag's commit.
+      - name: Check out pg_tle v1.5.3
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: aws/pg_tle
+          ref: 6340fd2ef19a806dc0f2588d6aec10a0a12f7e8b # v1.5.3
+          path: pg_tle
+          persist-credentials: false
+
+      # pg_tle's build needs flex and the GSSAPI headers beside the server
+      # headers pg-start installs.
+      - name: Install and start PostgreSQL 17
+        run: pg-start 17 flex libkrb5-dev
+
+      - name: Build and install pg_tle, preload it and restart
+        run: |
+          set -euo pipefail
+          make -C pg_tle -j"$(nproc)"
+          sudo make -C pg_tle install
+          sudo pg_conftool 17 test set shared_preload_libraries pg_tle
+          sudo pg_ctlcluster 17 test restart
+          psql -X -v ON_ERROR_STOP=1 -tA -c 'SHOW shared_preload_libraries'
+
+      # The script reaches the server as one psql variable, interpolated as
+      # a quoted literal (:'script'), so its text needs no dollar-quote tag
+      # and nothing in it is read as SQL by this step.
+      # No uxid control file is installed on this server, so
+      # CREATE EXTENSION uxid uses the one pg_tle holds.
+      - name: Install the extension through pgtle.install_extension and create it
+        run: |
+          set -euo pipefail
+          version="$(sed -n "s/^default_version = '\([^']*\)'$/\1/p" uxid.control)"
+          comment="$(sed -n "s/^comment = '\([^']*\)'$/\1/p" uxid.control)"
+          test -n "$version" || { echo "::error::no default_version in uxid.control" >&2; exit 1; }
+          test -n "$comment" || { echo "::error::no comment in uxid.control" >&2; exit 1; }
+          createdb tle
+          psql -X -v ON_ERROR_STOP=1 -d tle \
+            -v version="$version" -v comment="$comment" \
+            -v script="$(cat "uxid--${version}.sql")" <<'SQL'
+          CREATE EXTENSION pg_tle;
+          SELECT pgtle.install_extension('uxid', :'version', :'comment', :'script');
+          CREATE EXTENSION uxid;
+          SELECT extname, extversion FROM pg_extension ORDER BY extname;
+          SQL
+          got="$(psql -X -v ON_ERROR_STOP=1 -d tle -tA -c 'SELECT uxid_version()')"
+          echo "uxid_version() returns ${got}"
+          if [ "$got" != "$version" ]; then
+            echo "::error::uxid_version() returns ${got}, but uxid.control says ${version}" >&2
+            exit 1
+          fi

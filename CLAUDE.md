@@ -97,9 +97,10 @@ pushes the tag. The tag push is the release: the release workflow
 (`.github/workflows/release.yml`, the file the release publishes from)
 verifies the tag and its publish job creates the GitHub release on it,
 carrying `uxid-pg-<version>.tar.gz` (a `git archive` of the tag) and its
-`.sha256`. A failed workflow is re-run from its Actions page, never worked
-round by hand. That workflow arrives with a later change; until it is on
-`main`, nothing publishes this extension. The manifest's release kind,
+`.sha256`, with the version's `CHANGELOG.md` section as its notes. A failed
+workflow is re-run from its Actions page, never worked round by hand; the
+workflow's header says what each step checks, what a failure leaves behind
+and which re-run can go green. The manifest's release kind,
 `github-release`, is not one `/wurk:release` implements (it cuts `hex` only),
 so a prep is made by hand: these paragraphs are its recipe.
 
@@ -158,12 +159,13 @@ The tree on `main` today holds the build and the gate around an almost
 empty extension: the control file (`uxid.control`), the 1.0.0 extension
 script (`uxid--1.0.0.sql`), which defines only `uxid_version()`, the PGXS
 `Makefile`, one `pg_regress` test under `test/`, `mise.toml` with the gate
-tasks, the gate's Docker image under `docker/`, the sqlfluff configuration
+tasks, the gate's Docker image and its scripts under `docker/`, the CI and
+release workflows under `.github/workflows/`, the sqlfluff configuration
 (`.sqlfluff`), `LICENSE`, `CHANGELOG.md` and `changelog.d/`, beside these
 agent instructions, the wurk manifest (`.claude/wurk.json`), the Claude
 Code settings (`.claude/settings.json`) and the tracker files under
-`.beads/`. The identifier functions, the `uxid` domain, CI, the release
-workflow and the vendored corpus arrive with later changes; until they do,
+`.beads/`. The identifier functions, the `uxid` domain and the vendored
+corpus arrive with later changes; until they do,
 the sentences in this file about those describe the target, not the
 current tree.
 
@@ -199,8 +201,8 @@ server's `SELECT version()`, copies the tree into the container, runs
 `make install` and `make installcheck` (`pg_regress`) there, prints
 `regression.diffs` on a failure, and removes the container on every exit,
 so the build and the `pg_regress` output never land in the working tree.
-The gate then runs `sqlfluff lint` (the postgres dialect, `.sqlfluff`) over
-the extension script and `test/sql/`, and the conformance corpus check
+The gate then runs mise.toml's `lint` task, `sqlfluff lint` (the postgres
+dialect, `.sqlfluff`) over the extension script and `test/sql/`, and the conformance corpus check
 (`scripts/corpus-check.sh`) once the corpus is vendored: until
 `conformance/` or that script exists the step says so and passes, and once
 either exists a missing script fails the gate. The inner loop,
@@ -219,8 +221,13 @@ read from the catalog and pinned), a regression file per function and the
 full corpus.
 
 The gate proves the server version it runs on (18). The declared floor is
-PostgreSQL 14, stated apart from the gate's version; CI, once it lands, proves
-14 through 18.
+PostgreSQL 14, stated apart from the gate's version. CI
+(`.github/workflows/ci.yml`) runs the full gate on ubuntu-24.04, and
+`make installcheck` on PostgreSQL 14, 15, 16, 17 and 18 in the
+`pgxn/pgxn-tools` container; it runs the lint task, the extension script
+as a plain migration on 14 and 18, and the pg_tle install path on 17
+(pg_tle built at a pinned release, preloaded, the script installed through
+`pgtle.install_extension`). The workflow's header says what each job runs.
 
 ### This repo's own gate rules
 
@@ -300,7 +307,7 @@ satellite conventions rather than inventing a second set.
   corpus runner, lives under `test/` and is never part of `uxid--*.sql`.
 - **Pure SQL and PL/pgSQL, PostgreSQL 14 and later** (ruled by the operator,
   2026-10-24): a PGXS `Makefile`, `pg_regress` tests, the sqlfluff lint in
-  the gate, and CI on PostgreSQL 14 through 18 once CI lands.
+  the gate, and CI on PostgreSQL 14 through 18.
 - **Tests are `pg_regress` files** under `test/`: a `.sql` file and its
   expected output. Every public function carries a `COMMENT ON FUNCTION`
   saying what it does.
