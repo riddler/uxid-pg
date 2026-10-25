@@ -36,9 +36,9 @@ ORDER BY id NULLS LAST;
 -- ASCII order. Each id's random field runs against its time (the
 -- earliest time has the highest random field), and the rows go in out
 -- of order, so only the time can order them.
--- These ids sort the same under the gate database's default collation,
--- so the collation row above is what guards COLLATE "C"; this test pins
--- the order itself.
+-- All these ids are lower case, so a linguistic collation sorts them
+-- the same way; the mixed-case test below is the one whose order
+-- depends on COLLATE "C".
 CREATE TABLE uxid_ordered (time_ms bigint, id uxid);
 INSERT INTO uxid_ordered
 SELECT
@@ -66,6 +66,72 @@ SELECT
     array_agg(time_ms ORDER BY id)
     = array_agg(time_ms ORDER BY time_ms) AS id_order_is_time_order
 FROM uxid_ordered;
+
+-- Mixed case: COLLATE "C" compares bytes, and A to Z come before a to z,
+-- so the upper-case ids of one prefix and size sort before the
+-- lower-case ones, each group in time order. A linguistic collation
+-- folds case first and interleaves the two groups by time: the text
+-- column below, collated by ICU's root locale (a collation this test
+-- creates, as und-x-icu is), shows that order. The two orders are
+-- pinned row by row, and the uxid column's order is checked against the
+-- ids' bytes, so the result is the same whatever the server's default
+-- collation. On a server whose default is linguistic, such as the local
+-- gate's en_US.utf8, dropping
+-- COLLATE "C" from the domain makes the uxid column sort like the ICU
+-- column; on a server whose default is C the order cannot show it,
+-- and the collation row at the top of this file guards it there.
+-- sabotage: CREATE DOMAIN uxid AS text CHECK (...) with no COLLATE "C",
+-- run on the en_US.utf8 gate server -> " f" under
+-- uxid_order_is_bytewise, and the uxid rows in the ICU order
+CREATE TABLE uxid_mixed_case (time_ms bigint, id uxid);
+INSERT INTO uxid_mixed_case
+SELECT
+    t.time_ms,
+    uxid_encode(
+        'doc', 'm', t.time_ms, '\x0000000000'::bytea,
+        letter_case => t.letter_case
+    ) AS id
+FROM
+    (
+        VALUES
+        (1700000000002::bigint, 'lower'),
+        (1700000000001, 'upper'),
+        (1700000000003, 'upper'),
+        (1700000000000, 'lower')
+    ) AS t (time_ms, letter_case);
+CREATE COLLATION uxid_icu_root (PROVIDER = ICU, LOCALE = 'und');
+CREATE TABLE uxid_mixed_case_icu (
+    time_ms bigint,
+    id text COLLATE uxid_icu_root
+);
+INSERT INTO uxid_mixed_case_icu SELECT
+    time_ms,
+    id
+FROM uxid_mixed_case;
+SELECT
+    id,
+    time_ms
+FROM uxid_mixed_case
+ORDER BY id;
+SELECT
+    id,
+    time_ms
+FROM uxid_mixed_case_icu
+ORDER BY id;
+SELECT
+    (SELECT array_agg(m.id ORDER BY m.id) FROM uxid_mixed_case AS m)::text
+    = (
+        SELECT array_agg(m.id ORDER BY convert_to(m.id, 'UTF8'))
+        FROM uxid_mixed_case AS m
+    )::text AS uxid_order_is_bytewise,
+    (
+        SELECT array_agg(i.time_ms ORDER BY i.id)
+        FROM uxid_mixed_case_icu AS i
+    )
+    = (
+        SELECT array_agg(i.time_ms ORDER BY i.time_ms)
+        FROM uxid_mixed_case_icu AS i
+    ) AS icu_order_is_time_order;
 
 -- Every function takes and returns plain text, so a text column holding
 -- the same values works unchanged with each of them, and a uxid value
@@ -126,5 +192,8 @@ SELECT count(*) AS rows_kept FROM uxid_domain_row;
 
 DROP TABLE uxid_domain_row;
 DROP TABLE uxid_ordered;
+DROP TABLE uxid_mixed_case;
+DROP TABLE uxid_mixed_case_icu;
+DROP COLLATION uxid_icu_root;
 DROP TABLE uxid_text_row;
 DROP TABLE uxid_restored;
