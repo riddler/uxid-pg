@@ -1037,7 +1037,8 @@ COMMENT ON FUNCTION uxid_decode(text, bigint, text) IS
 'prefix, size, compact flag, deterministic flag and time (NULL for a '
 'deterministic body); raises SQLSTATE 22P02 with "uxid: empty", '
 '"uxid: invalid_length" or "uxid: invalid_character" for a malformed '
-'body. Defaults: delimiter _.';
+'body, and 22023 with invalid_argument for an empty delimiter or a '
+'clock_ms outside 0 to 2^48 - 1 on a compact time. Defaults: delimiter _.';
 
 CREATE FUNCTION uxid_decode_error(id text, delimiter text DEFAULT '_')
 RETURNS text
