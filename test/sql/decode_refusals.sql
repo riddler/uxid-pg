@@ -120,7 +120,7 @@ FROM
             'usr_01hf7yat00u', 'invalid_length'
         )
     ) AS c (case_id, input, expected)
-ORDER BY c.case_id;
+ORDER BY convert_to(c.case_id, 'UTF8');
 
 -- The order on bodies that fail more than one rule. An empty body has no
 -- length to refuse; a body of a wrong length with a character outside
@@ -143,7 +143,7 @@ FROM
         ('usr_z1yhw20vau'),
         ('usr_01hf7yat00')
     ) AS c (input)
-ORDER BY c.input;
+ORDER BY convert_to(c.input, 'UTF8');
 
 -- uxid_decode_error never raises: not for an empty delimiter (it answers
 -- invalid_argument), not for a NULL id or delimiter, and not for a
