@@ -1,0 +1,95 @@
+{
+  "wurk": 1,
+
+  "beads": {
+    "prefix": "uxpg",
+    "sync": "dolthub",
+    "topology": "beads",
+    "areas": {
+      "labels": [
+        "area:codec",
+        "area:monotonic",
+        "area:conformance",
+        "area:docs",
+        "area:build"
+      ],
+      "lands_alone": ["area:build"],
+      "always_batchable": ["upstream"]
+    }
+  },
+
+  "forge": {
+    "kind": "github",
+    "labels": {}
+  },
+
+  "gate": {
+    "full": ["mise", "run", "gate"],
+    "loop": ["mise", "run", "gate:loop"],
+    "build_paths": [
+      "uxid.control",
+      "uxid--1.0.0.sql",
+      "Makefile",
+      "docker/",
+      "test/",
+      "mise.toml",
+      ".sqlfluff"
+    ],
+    "also_gated_paths": ["conformance/", "scripts/", "README.md"],
+    "moving_files": [
+      "mise.toml",
+      "Makefile",
+      "docker/Dockerfile",
+      ".sqlfluff"
+    ],
+    "project_level_skips": [],
+    "not_applicable_skips": []
+  },
+
+  "parallelism": {
+    "model": "worktree-per-issue",
+    "worktrees_dir": "../uxid-pg-worktrees",
+    "trust": ["mise", "trust", "{path}"],
+    "warm_clone": [],
+    "warm": [["mise", "install"]],
+    "repair_when": "mise.toml",
+    "repair": [["mise", "install"]],
+    "post_branch": []
+  },
+
+  "tmux": {
+    "session": "uxid-pg",
+    "model": "opus"
+  },
+
+  "models": {
+    "direction": "fable"
+  },
+
+  "artifacts": {
+    "plans": "docs/plans",
+    "research": "docs/research",
+    "filename": "YYMMDD-[id-]kebab"
+  },
+
+  "commits": {
+    "style": "s-form",
+    "subject_under": 72,
+    "body_line_max": 72,
+    "total_lines_max": 40,
+    "trailer": {
+      "key": "Refs"
+    }
+  },
+
+  "changelog": {
+    "mode": "fragments",
+    "dir": "changelog.d"
+  },
+
+  "release": {
+    "kind": "github-release",
+    "version_file": "uxid.control",
+    "readme_pin": true
+  }
+}
