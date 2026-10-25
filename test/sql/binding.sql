@@ -14,6 +14,13 @@ SELECT public.uxid_generate('usr', 'xs', TRUE) ~ '^usr_[0-9a-hjkmnp-tv-z]{10}$'
 SELECT public.uxid_from('usr', 'alice@example.com', 's');
 SELECT public.uxid_check_request(size => 'xs', monotonic => TRUE);
 SELECT public.uxid_check_request(rand_size => 11);
+SELECT public.uxid_monotonic('usr', 's', time_ms => 1700000000000) ~ '^usr_'
+    AS monotonic_shape;
+SELECT
+    s.time_ms,
+    s.rand,
+    s.drew
+FROM public.uxid_monotonic_step(1, 5, 1, 2, NULL, 3, NULL) AS s;
 SELECT public.uxid_version();
 SELECT
     d.prefix,
@@ -50,6 +57,8 @@ SELECT
 FROM public.uxid_decode_at('usr_hf7yat0004hm5', 1700000000000) AS d;
 SELECT public.uxid_is_valid('usr_01hf7yat0004h1', '_', 'usr') AS id_valid;
 SELECT public.uxid_decode_error('usr_') AS decode_reason;
+SELECT public.uxid_monotonic('usr', 'xs') ~ '^usr_[0-9a-hjkmnp-tv-z]{10}$'
+    AS monotonic_shape;
 RESET search_path;
 
 -- After ALTER EXTENSION uxid SET SCHEMA, the functions live in the new
@@ -64,6 +73,8 @@ SELECT
 SELECT length(uxid_moved.uxid_generate('usr', 'm')) AS generated_length;
 SELECT uxid_moved.uxid_from('usr', 'alice@example.com', 's');
 SELECT uxid_moved.uxid_check_request(size => 'huge');
+SELECT uxid_moved.uxid_monotonic('doc', 'm') ~ '^doc_[0-9a-hjkmnp-tv-z]{18}$'
+    AS monotonic_shape;
 SELECT
     d.prefix,
     d.size,

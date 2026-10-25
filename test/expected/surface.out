@@ -41,8 +41,10 @@ ORDER BY p.proname;
  uxid_generate         | v           | s           | sql     | text                                                                                  | prefix text DEFAULT NULL::text, size text DEFAULT 'xl'::text, compact boolean DEFAULT false, rand_size integer DEFAULT NULL::integer, letter_case text DEFAULT 'lower'::text, delimiter text DEFAULT '_'::text, time_ms bigint DEFAULT NULL::bigint
  uxid_is_deterministic | i           | s           | sql     | boolean                                                                               | id text, delimiter text DEFAULT '_'::text
  uxid_is_valid         | i           | s           | sql     | boolean                                                                               | id text, delimiter text DEFAULT '_'::text, required_prefix text DEFAULT NULL::text
+ uxid_monotonic        | v           | u           | sql     | text                                                                                  | prefix text DEFAULT NULL::text, size text DEFAULT 'xl'::text, compact boolean DEFAULT NULL::boolean, rand_size integer DEFAULT NULL::integer, letter_case text DEFAULT 'lower'::text, delimiter text DEFAULT '_'::text, time_ms bigint DEFAULT NULL::bigint
+ uxid_monotonic_step   | i           | s           | sql     | TABLE(time_ms bigint, rand numeric, drew text)                                        | last_time_ms bigint, last_rand numeric, now_ms bigint, rand_width integer, seed numeric, step bigint, overflow_seed numeric
  uxid_version          | i           | s           | sql     | text                                                                                  | 
-(10 rows)
+(12 rows)
 
 -- The internal helpers, which start uxid__. The raise helper is VOLATILE
 -- so the planner never evaluates it ahead of time out of a CASE branch
@@ -73,23 +75,27 @@ WHERE
     e.extname = 'uxid'
     AND p.proname LIKE 'uxid\_\_%'
 ORDER BY p.proname;
-      proname       | provolatile | proparallel | lanname | result  |                            arguments                             
---------------------+-------------+-------------+---------+---------+------------------------------------------------------------------
- uxid__base32_bytes | i           | s           | sql     | text    | rand bytea
- uxid__base32_time  | i           | s           | sql     | text    | time_ms bigint, compact boolean
- uxid__base32_value | i           | s           | sql     | bigint  | chars text
- uxid__body         | i           | s           | sql     | text    | id text, delimiter text
- uxid__body_error   | i           | s           | sql     | text    | body text
- uxid__compact      | i           | s           | sql     | boolean | size text, compact boolean, monotonic boolean
- uxid__compact_time | i           | s           | sql     | bigint  | low_ms bigint, clock_ms bigint
- uxid__prefix       | i           | s           | sql     | text    | id text, delimiter text
- uxid__raise        | v           | s           | plpgsql | void    | error_name text, detail text
- uxid__raise_decode | v           | s           | plpgsql | void    | reason text
- uxid__rand_width   | i           | s           | sql     | integer | size text, compact boolean, rand_size integer, monotonic boolean
- uxid__random_bytes | v           | s           | sql     | bytea   | n integer
- uxid__size         | i           | s           | sql     | text    | size text
- uxid__uuid_bytes   | i           | s           | sql     | bytea   | uuid_bytes bytea
-(14 rows)
+        proname        | provolatile | proparallel | lanname |                         result                          |                                       arguments                                        
+-----------------------+-------------+-------------+---------+---------------------------------------------------------+----------------------------------------------------------------------------------------
+ uxid__base32_bytes    | i           | s           | sql     | text                                                    | rand bytea
+ uxid__base32_time     | i           | s           | sql     | text                                                    | time_ms bigint, compact boolean
+ uxid__base32_value    | i           | s           | sql     | bigint                                                  | chars text
+ uxid__body            | i           | s           | sql     | text                                                    | id text, delimiter text
+ uxid__body_error      | i           | s           | sql     | text                                                    | body text
+ uxid__bytes_numeric   | i           | s           | sql     | numeric                                                 | field bytea
+ uxid__compact         | i           | s           | sql     | boolean                                                 | size text, compact boolean, monotonic boolean
+ uxid__compact_time    | i           | s           | sql     | bigint                                                  | low_ms bigint, clock_ms bigint
+ uxid__monotonic_draws | i           | s           | sql     | TABLE(seed numeric, step bigint, overflow_seed numeric) | draws bytea, width integer
+ uxid__monotonic_rule  | i           | s           | sql     | text                                                    | last_time_ms bigint, last_rand numeric, now_ms bigint, rand_width integer, step bigint
+ uxid__numeric_bytes   | i           | s           | sql     | bytea                                                   | field_value numeric, width integer
+ uxid__prefix          | i           | s           | sql     | text                                                    | id text, delimiter text
+ uxid__raise           | v           | s           | plpgsql | void                                                    | error_name text, detail text
+ uxid__raise_decode    | v           | s           | plpgsql | void                                                    | reason text
+ uxid__rand_width      | i           | s           | sql     | integer                                                 | size text, compact boolean, rand_size integer, monotonic boolean
+ uxid__random_bytes    | v           | s           | sql     | bytea                                                   | n integer
+ uxid__size            | i           | s           | sql     | text                                                    | size text
+ uxid__uuid_bytes      | i           | s           | sql     | bytea                                                   | uuid_bytes bytea
+(18 rows)
 
 -- Every function carries a comment, and an internal helper's says it is
 -- not part of the public surface.
@@ -124,8 +130,12 @@ ORDER BY p.proname;
  uxid__base32_value    | t
  uxid__body            | t
  uxid__body_error      | t
+ uxid__bytes_numeric   | t
  uxid__compact         | t
  uxid__compact_time    | t
+ uxid__monotonic_draws | t
+ uxid__monotonic_rule  | t
+ uxid__numeric_bytes   | t
  uxid__prefix          | t
  uxid__raise           | t
  uxid__raise_decode    | t
@@ -142,8 +152,10 @@ ORDER BY p.proname;
  uxid_generate         | t
  uxid_is_deterministic | t
  uxid_is_valid         | t
+ uxid_monotonic        | t
+ uxid_monotonic_step   | t
  uxid_version          | t
-(24 rows)
+(30 rows)
 
 -- Every function except the two raise helpers is LANGUAGE sql with a
 -- BEGIN ATOMIC body (prosqlbody set), so its callees are bound when it is
@@ -170,8 +182,12 @@ ORDER BY p.proname;
  uxid__base32_value    | t
  uxid__body            | t
  uxid__body_error      | t
+ uxid__bytes_numeric   | t
  uxid__compact         | t
  uxid__compact_time    | t
+ uxid__monotonic_draws | t
+ uxid__monotonic_rule  | t
+ uxid__numeric_bytes   | t
  uxid__prefix          | t
  uxid__raise           | f
  uxid__raise_decode    | f
@@ -188,8 +204,10 @@ ORDER BY p.proname;
  uxid_generate         | t
  uxid_is_deterministic | t
  uxid_is_valid         | t
+ uxid_monotonic        | t
+ uxid_monotonic_step   | t
  uxid_version          | t
-(24 rows)
+(30 rows)
 
 -- No function of the extension calls random() or setseed(); the random
 -- bytes come from gen_random_uuid().

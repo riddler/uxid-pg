@@ -100,6 +100,9 @@ FROM
 -- sabotage: req.rand_size < -1 in place of req.rand_size < 0
 -- -> " negative rand_size | 22023 uxid: invalid_argument: rand_size must
 -- not be negative; got -1"
+-- sabotage: AND req.width = 0 added to the monotonic xs condition (the
+-- check of an explicit standard time at xs) -> " monotonic xs with
+-- explicit standard time and rand_size 1 | accepted"
 -- sabotage: 281474976710656 in place of 281474976710655 in the time range
 -- check -> " time past 2^48 - 1 | 22023 uxid: invalid_argument: ..."
 SELECT
@@ -140,6 +143,11 @@ FROM
             'monotonic xs with explicit standard time',
             $s$SELECT uxid_check_request(size => 'xs', compact => FALSE,
             monotonic => TRUE)$s$
+        ),
+        (
+            'monotonic xs with explicit standard time and rand_size 1',
+            $s$SELECT uxid_check_request(size => 'xs', compact => FALSE,
+            rand_size => 1, monotonic => TRUE)$s$
         ),
         (
             'monotonic with rand_size 0',

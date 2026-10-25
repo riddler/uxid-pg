@@ -290,8 +290,9 @@ COMMENT ON FUNCTION uxid__base32_bytes(bytea) IS
 -- deterministic request reads no time, random width or time form); then,
 -- for a time-based body, an explicit random width above 10 bytes, a fixed
 -- random field with monotonic generation, a fixed random field of the
--- wrong width, a monotonic request with no random field, and a compact
--- time whose first character would be the deterministic marker. The
+-- wrong width, a monotonic xs with an explicit standard time, a
+-- monotonic request with no random field, and a compact time whose first
+-- character would be the deterministic marker. The
 -- invalid_argument checks on an option's own value come first, and the
 -- time range check comes before the random width checks.
 CREATE FUNCTION uxid_check_request(
@@ -392,6 +393,14 @@ BEGIN ATOMIC
                             octet_length(req.rand)
                         )
                     )
+            WHEN req.monotonic AND req.short_size = 'xs' AND NOT req.compact
+                THEN
+                    uxid__raise(
+                        'invalid_argument',
+                        'a monotonic xs uses compact time, so its random '
+                        'field has a byte to step; compact must be NULL or '
+                        'true'
+                    )
             WHEN req.monotonic AND req.width = 0
                 THEN
                     uxid__raise(
@@ -416,6 +425,7 @@ BEGIN ATOMIC
         (
             SELECT
                 size,
+                compact,
                 rand_size,
                 delimiter,
                 time_ms,
@@ -435,8 +445,10 @@ COMMENT ON FUNCTION uxid_check_request(
 'Refuses a generation request, raising SQLSTATE 22023 with the message '
 '"uxid: <name>: <detail>" for the first refusal that applies: '
 'invalid_argument for an unknown size or letter_case, an empty delimiter, '
-'a negative rand_size, a time_ms outside 0 to 2^48 - 1 or a monotonic '
-'request with no random field; rand_with_from, from_with_monotonic, '
+'a negative rand_size, a time_ms outside 0 to 2^48 - 1, a monotonic xs '
+'with compact false (a monotonic xs always uses compact time) or a '
+'monotonic request with no random field; rand_with_from, '
+'from_with_monotonic, '
 'rand_size_too_large, rand_with_monotonic, rand_width_mismatch and '
 'compact_time_out_of_range as the wire format names them. Returns nothing '
 'for a request it accepts. A NULL prefix, size, letter_case, delimiter or '
@@ -1118,3 +1130,474 @@ COMMENT ON DOMAIN uxid IS
 'uxid_is_valid with the default delimiter _, and ids of one prefix, size '
 'and letter case sort by time. Every uxid function takes and returns '
 'plain text, so a text column works unchanged.';
+
+-- Monotonic generation (the wire format's "Monotonic generation"). The
+-- random field of width w bytes is read as one big-endian unsigned
+-- integer below 2^(8w), held as numeric because an xl field is 80 bits;
+-- every conversion between it and the field's bytes is exact.
+
+-- The unsigned big-endian integer of up to 10 bytes, as numeric: the
+-- high 5 bytes times 2^40 plus the low 5 bytes. The empty field is 0.
+CREATE FUNCTION uxid__bytes_numeric(field bytea)
+RETURNS numeric
+LANGUAGE sql
+IMMUTABLE PARALLEL SAFE
+BEGIN ATOMIC
+    SELECT
+        ('x' || substr(h.hex, 1, 10))::bit(40)::bigint::numeric
+        * 1099511627776
+        + ('x' || substr(h.hex, 11, 10))::bit(40)::bigint AS field_value
+    FROM (SELECT lpad(encode(field, 'hex'), 20, '0') AS hex) AS h;
+END;
+
+COMMENT ON FUNCTION uxid__bytes_numeric(bytea) IS
+'Internal helper of the uxid extension, not part of its public surface: '
+'up to 10 bytes read as one big-endian unsigned integer, exactly.';
+
+-- The width bytes, big-endian, of an integer from 0 to 2^(8 x width) - 1
+-- (width 0 to 10): the inverse of uxid__bytes_numeric.
+CREATE FUNCTION uxid__numeric_bytes(field_value numeric, width integer)
+RETURNS bytea
+LANGUAGE sql
+IMMUTABLE PARALLEL SAFE
+BEGIN ATOMIC
+    SELECT
+        decode(
+            right(
+                lpad(to_hex(div(field_value, 1099511627776)::bigint), 10, '0')
+                || lpad(
+                    to_hex(mod(field_value, 1099511627776)::bigint), 10, '0'
+                ),
+                2 * width
+            ),
+            'hex'
+        );
+END;
+
+COMMENT ON FUNCTION uxid__numeric_bytes(numeric, integer) IS
+'Internal helper of the uxid extension, not part of its public surface: '
+'the width bytes, big-endian, of an integer below 2^(8 x width).';
+
+-- The three draws of one monotonic call, cut from 25 random bytes for a
+-- field of width bytes (1 to 10): the seed is bytes 1 to width, the step
+-- is the low 4 x width bits of the ceil(width / 2) bytes from byte 11,
+-- plus one, so it is uniform from 1 to 2^(4 x width) with no modulo bias,
+-- and the overflow seed is width bytes from byte 16.
+CREATE FUNCTION uxid__monotonic_draws(draws bytea, width integer)
+RETURNS TABLE (seed numeric, step bigint, overflow_seed numeric)
+LANGUAGE sql
+IMMUTABLE PARALLEL SAFE
+BEGIN ATOMIC
+    SELECT
+        uxid__bytes_numeric(substring(draws FROM 1 FOR width)) AS seed_value,
+        (
+            uxid__bytes_numeric(
+                substring(draws FROM 11 FOR (width + 1) / 2)
+            )::bigint
+            & ((1::bigint << (4 * width)) - 1)
+        ) + 1 AS step_value,
+        uxid__bytes_numeric(substring(draws FROM 16 FOR width))
+            AS overflow_value;
+END;
+
+COMMENT ON FUNCTION uxid__monotonic_draws(bytea, integer) IS
+'Internal helper of the uxid extension, not part of its public surface: '
+'the seed, step and overflow seed of one monotonic call cut from 25 '
+'random bytes; the step is the low 4 x width bits of ceil(width / 2) '
+'bytes plus one.';
+
+-- Which of the wire format's three rules applies: seed (rule 1, no state
+-- or a clock later than the last time), step (rule 2, the last value
+-- plus the step fits the field) or step_overflow (rule 3, it does not).
+-- A missing step reads as step, so the caller can refuse it by name.
+CREATE FUNCTION uxid__monotonic_rule(
+    last_time_ms bigint,
+    last_rand numeric,
+    now_ms bigint,
+    rand_width integer,
+    step bigint
+)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE PARALLEL SAFE
+BEGIN ATOMIC
+    SELECT
+        CASE
+            WHEN last_time_ms IS NULL OR now_ms > last_time_ms THEN 'seed'
+            WHEN step IS NULL THEN 'step'
+            WHEN
+                last_rand + step
+                <= uxid__bytes_numeric(decode(repeat('ff', rand_width), 'hex'))
+                THEN 'step'
+            ELSE 'step_overflow'
+        END;
+END;
+
+COMMENT ON FUNCTION uxid__monotonic_rule(
+    bigint, numeric, bigint, integer, bigint
+) IS
+'Internal helper of the uxid extension, not part of its public surface: '
+'which monotonic rule applies (seed, step or step_overflow).';
+
+-- The pure step of the monotonic generator, the function the corpus
+-- drives with its draws. Refuses with invalid_argument a width outside 1
+-- to 10, a NULL now_ms, a last time without a last value (or the other
+-- way round), a last value, seed or overflow seed that is not an integer
+-- from 0 to 2^(8w) - 1, a step outside 1 to 2^(4w), and a NULL draw that
+-- the rule taken needs. A draw the rule does not take may be NULL.
+CREATE FUNCTION uxid_monotonic_step(
+    last_time_ms bigint,
+    last_rand numeric,
+    now_ms bigint,
+    rand_width integer,
+    seed numeric,
+    step bigint,
+    overflow_seed numeric
+)
+RETURNS TABLE (time_ms bigint, rand numeric, drew text)
+LANGUAGE sql
+IMMUTABLE PARALLEL SAFE
+BEGIN ATOMIC
+    SELECT
+        CASE
+            WHEN a.width IS NULL OR a.width < 1 OR a.width > 10
+                THEN
+                    uxid__raise(
+                        'invalid_argument',
+                        format(
+                            'rand_width must be from 1 to 10; got %s',
+                            coalesce(a.width::text, 'NULL')
+                        )
+                    )
+            WHEN a.clock IS NULL
+                THEN
+                    uxid__raise(
+                        'invalid_argument', 'the monotonic step needs a now_ms'
+                    )
+            WHEN (a.last_time IS NULL) <> (a.last_value IS NULL)
+                THEN
+                    uxid__raise(
+                        'invalid_argument',
+                        'last_time_ms and last_rand are both given or both NULL'
+                    )
+            WHEN
+                a.last_value < 0
+                OR a.last_value > a.field_max
+                OR a.last_value <> trunc(a.last_value)
+                THEN
+                    uxid__raise(
+                        'invalid_argument',
+                        format(
+                            'last_rand must be an integer from 0 to %s; got %s',
+                            a.field_max,
+                            a.last_value
+                        )
+                    )
+            WHEN
+                a.seed_value < 0
+                OR a.seed_value > a.field_max
+                OR a.seed_value <> trunc(a.seed_value)
+                THEN
+                    uxid__raise(
+                        'invalid_argument',
+                        format(
+                            'seed must be an integer from 0 to %s; got %s',
+                            a.field_max,
+                            a.seed_value
+                        )
+                    )
+            WHEN a.step_value < 1 OR a.step_value > a.step_max
+                THEN
+                    uxid__raise(
+                        'invalid_argument',
+                        format(
+                            'step must be from 1 to %s; got %s',
+                            a.step_max,
+                            a.step_value
+                        )
+                    )
+            WHEN
+                a.overflow_value < 0
+                OR a.overflow_value > a.field_max
+                OR a.overflow_value <> trunc(a.overflow_value)
+                THEN
+                    uxid__raise(
+                        'invalid_argument',
+                        format(
+                            'overflow_seed must be an integer from 0 to %s; '
+                            'got %s',
+                            a.field_max,
+                            a.overflow_value
+                        )
+                    )
+        END
+    FROM
+        (
+            SELECT
+                rand_width AS width,
+                now_ms AS clock,
+                last_time_ms AS last_time,
+                last_rand AS last_value,
+                seed AS seed_value,
+                step AS step_value,
+                overflow_seed AS overflow_value,
+                uxid__bytes_numeric(
+                    decode(
+                        repeat('ff', least(greatest(rand_width, 0), 10)), 'hex'
+                    )
+                ) AS field_max,
+                1::bigint << (4 * least(greatest(rand_width, 0), 10))
+                    AS step_max
+        ) AS a;
+    SELECT
+        CASE
+            WHEN a.chosen = 'seed' AND a.seed_value IS NULL
+                THEN
+                    uxid__raise(
+                        'invalid_argument',
+                        'a fresh value is drawn here, and seed is NULL'
+                    )
+            WHEN a.chosen = 'step' AND a.step_value IS NULL
+                THEN
+                    uxid__raise(
+                        'invalid_argument',
+                        'the last value is stepped here, and step is NULL'
+                    )
+            WHEN a.chosen = 'step_overflow' AND a.overflow_value IS NULL
+                THEN
+                    uxid__raise(
+                        'invalid_argument',
+                        'the step overflows the field here, and overflow_seed '
+                        'is NULL'
+                    )
+        END
+    FROM
+        (
+            SELECT
+                seed AS seed_value,
+                step AS step_value,
+                overflow_seed AS overflow_value,
+                uxid__monotonic_rule(
+                    last_time_ms, last_rand, now_ms, rand_width, step
+                ) AS chosen
+        ) AS a;
+    SELECT
+        n.next_time_ms,
+        n.next_rand,
+        n.drew_rule
+    FROM
+        (
+            SELECT
+                a.chosen AS drew_rule,
+                CASE a.chosen
+                    WHEN 'seed' THEN a.clock
+                    WHEN 'step' THEN a.last_time
+                    ELSE a.last_time + 1
+                END AS next_time_ms,
+                CASE a.chosen
+                    WHEN 'seed' THEN a.seed_value
+                    WHEN 'step' THEN a.last_value + a.step_value
+                    ELSE a.overflow_value
+                END AS next_rand
+            FROM
+                (
+                    SELECT
+                        now_ms AS clock,
+                        last_time_ms AS last_time,
+                        last_rand AS last_value,
+                        seed AS seed_value,
+                        step AS step_value,
+                        overflow_seed AS overflow_value,
+                        uxid__monotonic_rule(
+                            last_time_ms, last_rand, now_ms, rand_width, step
+                        ) AS chosen
+                ) AS a
+        ) AS n;
+END;
+
+COMMENT ON FUNCTION uxid_monotonic_step(
+    bigint, numeric, bigint, integer, numeric, bigint, numeric
+) IS
+'The pure step of the monotonic generator, by the wire format''s three '
+'rules, for a random field of rand_width bytes (1 to 10) read as one '
+'big-endian unsigned integer: with no state (last_time_ms and last_rand '
+'NULL) or now_ms later than last_time_ms, now_ms and the fresh seed '
+'(drew seed); otherwise last_time_ms and last_rand + step (drew step); '
+'and when that reaches 2^(8 x rand_width), last_time_ms + 1 and the '
+'fresh overflow_seed (drew step_overflow). Returns one row of time_ms, '
+'rand and drew. A draw the rule does not take may be NULL; a NULL draw '
+'it takes, or a value outside its range (a seed or last value from 0 '
+'to 2^(8 x rand_width) - 1, a step from 1 to 2^(4 x rand_width)), is '
+'refused with SQLSTATE 22023 and invalid_argument.';
+
+-- The monotonic generator. Its state is one session setting per prefix
+-- and random width, uxid.mono_<the prefix's UTF-8 bytes in hex>_<width>
+-- (no prefix is the empty hex, so NULL and the empty string share it),
+-- holding "<time_ms>:<rand>" in decimal, read with current_setting(name,
+-- true) and written with set_config(name, value, false). The first
+-- statement refuses the request before anything is read, drawn or
+-- written; the second reads the state, draws two UUIDs' worth of random
+-- bytes, takes the step, encodes the id (uxid_encode checks the time the
+-- id carries) and writes the new state with a value computed from that
+-- id, so the encoder has accepted the id before the state is written. A
+-- setting written in a statement that fails is undone with it, so a
+-- refused call leaves the state as it was.
+CREATE FUNCTION uxid_monotonic(
+    prefix text DEFAULT NULL,
+    size text DEFAULT 'xl',
+    compact boolean DEFAULT NULL,
+    rand_size integer DEFAULT NULL,
+    letter_case text DEFAULT 'lower',
+    delimiter text DEFAULT '_',
+    time_ms bigint DEFAULT NULL
+)
+RETURNS text
+LANGUAGE sql
+VOLATILE PARALLEL UNSAFE
+BEGIN ATOMIC
+    SELECT
+        uxid_check_request(
+            prefix => prefix,
+            size => size,
+            compact => compact,
+            rand_size => rand_size,
+            letter_case => letter_case,
+            delimiter => delimiter,
+            time_ms => time_ms,
+            monotonic => TRUE
+        );
+    SELECT
+        CASE
+            WHEN
+                set_config(
+                    emitted.setting_name,
+                    CASE
+                        WHEN emitted.id IS NOT NULL
+                            THEN
+                                emitted.next_time_ms::text
+                                || ':'
+                                || emitted.next_rand::text
+                    END,
+                    FALSE
+                ) IS NOT NULL
+                THEN emitted.id
+        END
+    FROM
+        (
+            SELECT
+                req.setting_name,
+                st.time_ms AS next_time_ms,
+                st.rand AS next_rand,
+                uxid_encode(
+                    req.given_prefix,
+                    req.given_size,
+                    st.time_ms,
+                    uxid__numeric_bytes(st.rand, req.width),
+                    req.is_compact,
+                    req.given_case,
+                    req.given_delimiter,
+                    req.given_rand_size
+                ) AS id
+            FROM
+                (
+                    SELECT
+                        state.given_prefix,
+                        state.given_size,
+                        state.given_case,
+                        state.given_delimiter,
+                        state.given_rand_size,
+                        state.width,
+                        state.is_compact,
+                        state.now_ms,
+                        state.setting_name,
+                        nullif(split_part(state.saved, ':', 1), '')::bigint
+                            AS last_time_ms,
+                        nullif(split_part(state.saved, ':', 2), '')::numeric
+                            AS last_rand,
+                        uxid__random_bytes(25) AS draws
+                    FROM
+                        (
+                            SELECT
+                                form.given_prefix,
+                                form.given_size,
+                                form.given_case,
+                                form.given_delimiter,
+                                form.given_rand_size,
+                                form.width,
+                                form.is_compact,
+                                form.now_ms,
+                                form.setting_name,
+                                current_setting(form.setting_name, TRUE)
+                                    AS saved
+                            FROM
+                                (
+                                    SELECT
+                                        prefix AS given_prefix,
+                                        size AS given_size,
+                                        letter_case AS given_case,
+                                        delimiter AS given_delimiter,
+                                        rand_size AS given_rand_size,
+                                        uxid__rand_width(
+                                            size, compact, rand_size, TRUE
+                                        ) AS width,
+                                        uxid__compact(size, compact, TRUE)
+                                            AS is_compact,
+                                        coalesce(
+                                            time_ms,
+                                            floor(
+                                                extract(
+                                                    EPOCH FROM clock_timestamp()
+                                                ) * 1000
+                                            )::bigint
+                                        ) AS now_ms,
+                                        'uxid.mono_'
+                                        || encode(
+                                            convert_to(
+                                                coalesce(prefix, ''), 'UTF8'
+                                            ),
+                                            'hex'
+                                        )
+                                        || '_'
+                                        || uxid__rand_width(
+                                            size, compact, rand_size, TRUE
+                                        ) AS setting_name
+                                ) AS form
+                        ) AS state
+                ) AS req
+            CROSS JOIN LATERAL uxid__monotonic_draws(req.draws, req.width) AS d
+            CROSS JOIN
+                LATERAL uxid_monotonic_step(
+                    req.last_time_ms,
+                    req.last_rand,
+                    req.now_ms,
+                    req.width,
+                    d.seed,
+                    d.step,
+                    d.overflow_seed
+                ) AS st
+        ) AS emitted;
+END;
+
+COMMENT ON FUNCTION uxid_monotonic(
+    text, text, boolean, integer, text, text, bigint
+) IS
+'Generates a time-based id that sorts after the last one this session '
+'generated for the same prefix and random width, by the wire format''s '
+'monotonic rules: a fresh random field when the time (time_ms, or the '
+'clock_timestamp() time when it is NULL) is later than the last id''s, '
+'otherwise the last id''s time and its random field plus a step drawn '
+'uniformly from 1 to 2^(4 x width), and the next millisecond with a fresh '
+'field when the step overflows. The random bytes come from two '
+'uuid_send(gen_random_uuid()) calls. The state is a session setting, '
+'uxid.mono_<hex of the prefix''s UTF-8 bytes>_<width>, so the order holds '
+'within one session only, never across sessions, connections or the '
+'backends behind a pooler; the setting is transactional, so a '
+'transaction that aborts (or a savepoint rolled back) restores the state '
+'it found and ids returned inside it may repeat in the same session; '
+'RESET ALL and DISCARD ALL clear it. A refused call raises and leaves the '
+'state as it was. An xs always uses compact time: compact NULL is the '
+'size''s default (compact for xs, standard otherwise) and an explicit '
+'compact false at xs is refused with invalid_argument. Refuses as '
+'uxid_check_request does with monotonic true. Defaults: size xl, lower '
+'case, delimiter _, no prefix (NULL and the empty string share one '
+'state). Volatile and parallel unsafe.';
